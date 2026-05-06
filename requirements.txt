@@ -1,40 +1,19 @@
-# ── core
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-sqlalchemy==2.0.35
-alembic==1.13.3
-pydantic==2.9.2
-pydantic-settings==2.5.2
-python-dotenv==1.0.1
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
-aiosqlite==0.20.0
+# API 서버
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+
+# DB
+sqlalchemy==2.0.49
+aiosqlite==0.22.1
+pymysql==1.1.3
+
+# 설정
+pydantic==2.12.5
+pydantic-settings==2.14.0
+python-dotenv==1.2.2
 
 # MQTT
-paho-mqtt==2.1.0
-aiomqtt==2.3.0
+paho-mqtt==1.6.1
 
-# Camera / Vision
-opencv-python-headless==4.10.0.84
-ultralytics==8.3.0
-numpy==1.26.4
-pillow==10.4.0
-
-# VLM client
-httpx==0.27.2
-openai==1.50.2
-
-# Scheduler
-apscheduler==3.10.4
-
-# Push notification (FCM)
-firebase-admin==6.5.0
-
-# Regression model
-scikit-learn==1.5.2
-joblib==1.4.2
-
-# Utilities
-python-multipart==0.0.12
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+# mDNS
+zeroconf==0.148.0

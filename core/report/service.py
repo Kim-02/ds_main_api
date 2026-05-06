@@ -29,9 +29,6 @@ async def stop_detection(db: AsyncSession, event_id: int, req: StopDetectionRequ
     if event.status != AnomalyStatus.active:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Event is not active")
 
-    from core.detection_manager import manager
-    await manager.stop(event_id)
-
     return await crud.update_anomaly_event(
         db, event, status=AnomalyStatus.stopped, end_time=datetime.now(timezone.utc)
     )
