@@ -28,3 +28,31 @@ class WorkerOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# 아래부터 추가한 스키마
+class WorkerDbOut(BaseModel):
+    dept_id: int
+    name: str
+    is_manager: int
+    sen_id: Optional[int] = None
+    sensor_id: Optional[str] = None
+    sensor_type: Optional[str] = None
+    sensor_name: Optional[str] = None
+
+
+class AssignHeartBandRequest(BaseModel):
+    sensor_id: str
+    jetson_id: Optional[int] = None
+    interval_ms: int = 5000
+
+
+class AssignHeartBandResponse(BaseModel):
+    success: bool
+    message: str
+    data: dict[str, Any]
+
+
+class UnassignSensorResponse(BaseModel):
+    success: bool
+    message: str
