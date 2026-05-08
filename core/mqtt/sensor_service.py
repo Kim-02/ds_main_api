@@ -24,6 +24,23 @@ class MqttSensorService:
 
         self.hr_windows = defaultdict(lambda: deque(maxlen=10))
         self.high_hr_start_times: dict = {}
+        self.rest_repository = None
+        self.rest_runtime_service = None
+        self._init_rest_runtime()
+
+    def _init_rest_runtime(self):
+        try:
+            from ai.rest import DatabaseHandlerRestDataRepository, RestRuntimeService
+
+            self.rest_repository = DatabaseHandlerRestDataRepository(self.db_handler)
+            self.rest_runtime_service = RestRuntimeService.from_model_path(
+                repository=self.rest_repository,
+            )
+            print("[MQTT Sensor] 휴식 예측 모델 로드 완료")
+        except Exception as e:
+            self.rest_repository = None
+            self.rest_runtime_service = None
+            print(f"[MQTT Sensor] 휴식 예측 모델 비활성화: {e}")
 
     def start(self):
         if self._running:
@@ -123,6 +140,7 @@ class MqttSensorService:
             print(f"[MQTT Sensor] 심박 저장 실패: {e}")
 
         self._check_heart_rate_alert(sensor_id, hr)
+        self._check_rest_recommendation(sensor_id)
 
     def _check_heart_rate_alert(self, sensor_id: str, hr: float):
         window = self.hr_windows[sensor_id]
@@ -138,6 +156,28 @@ class MqttSensorService:
                 self.high_hr_start_times.pop(sensor_id, None)
         else:
             self.high_hr_start_times.pop(sensor_id, None)
+
+    def _check_rest_recommendation(self, sensor_id: str):
+        if self.rest_runtime_service is None or self.rest_repository is None:
+            return
+
+        try:
+            worker_id = self.rest_repository.find_worker_id_by_sensor_id(sensor_id)
+            if not worker_id:
+                return
+
+            result = self.rest_runtime_service.evaluate_worker(worker_id)
+            if not result.should_rest or result.command is None:
+                return
+
+            topic, payload = result.command.to_topic_and_payload()
+            self.client.publish(topic, payload)
+            print(
+                "[MQTT Sensor] 휴식 권고 → "
+                f"worker={worker_id}, result={result.prediction.get('result')}, topic={topic}"
+            )
+        except Exception as e:
+            print(f"[MQTT Sensor] 휴식 예측 스킵: {e}")
 
     # ------------------------------------------------------------------
     # Publish 명령
