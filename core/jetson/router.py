@@ -9,6 +9,7 @@ router = APIRouter(prefix="/api/jetson", tags=["jetson"])
 def register_jetson(req: JetsonRegisterReq, request: Request):
     db = request.app.state.db
     jetson = db.register_jetson_connection(req.dept_id, req.app_id)
+    print(jetson['ip_addr'])
     if not jetson:
         raise HTTPException(status_code=404, detail="DB에 Jetson 초기 정보가 없습니다.")
 

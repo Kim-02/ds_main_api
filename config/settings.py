@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Database
-    jetson_db_url: str = "sqlite+aiosqlite:///./jetson.db"
+    jetson_db_url: str = "mysql+pymysql://user:password@127.0.0.1:3306/ON_SAFE"
     corporate_db_url: str = ""
 
     # MQTT
@@ -36,14 +36,14 @@ class Settings(BaseSettings):
 
     # MariaDB (기존 Jetson DB)
     mariadb_host: str = "127.0.0.1"
-    mariadb_user: str = "myuser"
-    mariadb_password: str = "mypassword"
-    mariadb_db_name: str = "mydb"
+    mariadb_user: str = "root"
+    mariadb_password: str = "ekthf123"
+    mariadb_db_name: str = "ON_SAFE"
     mariadb_port: int = 3306
 
     # mDNS Jetson 자기 방송
-    mdns_service_name: str = "DS_Safer_Jetson._jetsonhub._tcp.local."
     mdns_service_type: str = "_jetsonhub._tcp.local."
+    mdns_service_name: str = "OnSafe Jetson" 
 
     # API
     api_host: str = "0.0.0.0"

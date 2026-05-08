@@ -33,3 +33,4 @@ async def handle(device_id: str, payload: dict) -> None:
         humidity=humidity or 0.0,
     )
     logger.debug("온습도 저장: sensor=%s T=%.1f H=%.1f", sensor_id, temperature, humidity or 0)
+
