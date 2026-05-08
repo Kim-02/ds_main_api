@@ -54,7 +54,8 @@ class BandControlCommandBuilder:
         self.reset_after_ms = reset_after_ms
 
     def build(self, target_topic: str) -> BandControlCommand:
-        return BandControlCommand(
+        print(f"[RestCommandBuilder] START build target_topic={target_topic}")
+        command = BandControlCommand(
             target_topic=target_topic,
             color=self.color,
             vibration=self.vibration,
@@ -62,6 +63,8 @@ class BandControlCommandBuilder:
             duration_ms=self.duration_ms,
             reset_after_ms=self.reset_after_ms,
         )
+        print(f"[RestCommandBuilder] END build command={command.to_dict()}")
+        return command
 
 
 class RestRuntimeService:
@@ -71,6 +74,12 @@ class RestRuntimeService:
         engine: RestModelEngine,
         command_builder: Optional[BandControlCommandBuilder] = None,
     ):
+        print(
+            "[RestRuntimeService] INIT "
+            f"repository={repository.__class__.__name__}, "
+            f"engine={engine.__class__.__name__}, "
+            f"command_builder={(command_builder or BandControlCommandBuilder()).__class__.__name__}"
+        )
         self.repository = repository
         self.engine = engine
         self.command_builder = command_builder or BandControlCommandBuilder()
@@ -84,20 +93,36 @@ class RestRuntimeService:
         command_builder: Optional[BandControlCommandBuilder] = None,
     ) -> "RestRuntimeService":
         resolved_model_path = Path(model_path) if model_path else DEFAULT_MODEL_PATH
+        print(
+            "[RestRuntimeService] START from_model_path "
+            f"model_path={resolved_model_path}, "
+            f"forced_rest_work_min={forced_rest_work_min}"
+        )
         engine = RestModelEngine(
             model_path=str(resolved_model_path),
             forced_rest_work_min=forced_rest_work_min,
         )
-        return cls(
+        service = cls(
             repository=repository,
             engine=engine,
             command_builder=command_builder,
         )
+        print("[RestRuntimeService] END from_model_path")
+        return service
 
     def evaluate_worker(self, worker_id: str) -> RestRuntimeResult:
+        print(f"[RestRuntimeService] START evaluate_worker worker_id={worker_id}")
+        print("[RestRuntimeService] -> repository.fetch_environment START")
         environment = self.repository.fetch_environment(worker_id)
+        print(f"[RestRuntimeService] <- repository.fetch_environment END data={environment}")
+
+        print("[RestRuntimeService] -> repository.fetch_watch START")
         watch = self.repository.fetch_watch(worker_id)
+        print(f"[RestRuntimeService] <- repository.fetch_watch END data={watch}")
+
+        print("[RestRuntimeService] -> repository.fetch_worker_profile START")
         profile = self.repository.fetch_worker_profile(worker_id)
+        print(f"[RestRuntimeService] <- repository.fetch_worker_profile END data={profile}")
 
         raw = WorkerRawInput(
             worker_id=profile.worker_id,
@@ -115,18 +140,39 @@ class RestRuntimeService:
             other_disease=profile.other_disease,
             baseline_hr=watch.baseline_hr,
         )
+        print(f"[RestRuntimeService] raw input built={raw}")
 
+        print("[RestRuntimeService] -> engine.predict START")
         prediction = self.engine.predict(raw)
+        print(f"[RestRuntimeService] <- engine.predict END prediction={prediction}")
+
         command = None
-        if self.should_send_rest_command(prediction):
+        should_send = self.should_send_rest_command(prediction)
+        print(
+            "[RestRuntimeService] command decision "
+            f"result={prediction.get('result')}, should_send={should_send}"
+        )
+        if should_send:
             command = self.command_builder.build(profile.target_topic)
 
-        return RestRuntimeResult(
+        result = RestRuntimeResult(
             worker_id=profile.worker_id,
             prediction=prediction,
             command=command,
         )
+        print(
+            "[RestRuntimeService] END evaluate_worker "
+            f"worker_id={worker_id}, should_rest={result.should_rest}, "
+            f"command={result.command.to_dict() if result.command else None}"
+        )
+        return result
 
     @staticmethod
     def should_send_rest_command(prediction: Dict[str, Any]) -> bool:
-        return prediction.get("result") in REST_REQUIRED_RESULTS
+        result = prediction.get("result")
+        should_send = result in REST_REQUIRED_RESULTS
+        print(
+            "[RestRuntimeService] should_send_rest_command "
+            f"result={result}, required={REST_REQUIRED_RESULTS}, should_send={should_send}"
+        )
+        return should_send

@@ -14,16 +14,24 @@ from ai.rest.mariadb_repository import DatabaseHandlerRestDataRepository
 
 class FakeRepository:
     def __init__(self, target_topic: str = "sensors/band-01/alert"):
+        print(f"[Test/FakeRepository] INIT target_topic={target_topic}")
         self.target_topic = target_topic
 
     def fetch_environment(self, worker_id: str) -> EnvironmentSample:
-        return EnvironmentSample(temp_c=33.5, humid=68.0)
+        print(f"[Test/FakeRepository] START fetch_environment worker_id={worker_id}")
+        sample = EnvironmentSample(temp_c=33.5, humid=68.0)
+        print(f"[Test/FakeRepository] END fetch_environment sample={sample}")
+        return sample
 
     def fetch_watch(self, worker_id: str) -> WatchSample:
-        return WatchSample(hr=128.0, baseline_hr=88.0)
+        print(f"[Test/FakeRepository] START fetch_watch worker_id={worker_id}")
+        sample = WatchSample(hr=128.0, baseline_hr=88.0)
+        print(f"[Test/FakeRepository] END fetch_watch sample={sample}")
+        return sample
 
     def fetch_worker_profile(self, worker_id: str) -> WorkerProfile:
-        return WorkerProfile(
+        print(f"[Test/FakeRepository] START fetch_worker_profile worker_id={worker_id}")
+        profile = WorkerProfile(
             worker_id=worker_id,
             age=61,
             gender=1,
@@ -36,16 +44,20 @@ class FakeRepository:
             other_disease=0,
             target_topic=self.target_topic,
         )
+        print(f"[Test/FakeRepository] END fetch_worker_profile profile={profile}")
+        return profile
 
 
 class FakeEngine:
     def __init__(self, result: str):
+        print(f"[Test/FakeEngine] INIT result={result}")
         self.result = result
         self.last_raw = None
 
     def predict(self, raw):
+        print(f"[Test/FakeEngine] START predict raw={raw}")
         self.last_raw = raw
-        return {
+        prediction = {
             "worker_id": raw.worker_id,
             "result": self.result,
             "reason": "fake",
@@ -54,14 +66,19 @@ class FakeEngine:
             "hr_delta_from_baseline": raw.hr - raw.baseline_hr,
             "probabilities": None,
         }
+        print(f"[Test/FakeEngine] END predict prediction={prediction}")
+        return prediction
 
 
 class FakeWatchPublisher:
     def __init__(self):
+        print("[Test/FakeWatchPublisher] INIT")
         self.published = []
 
     def publish(self, topic: str, payload: str):
+        print(f"[Test/FakeWatchPublisher] START publish topic={topic}, payload={payload}")
         self.published.append((topic, payload))
+        print(f"[Test/FakeWatchPublisher] END publish published_count={len(self.published)}")
 
 
 def run_dummy_rest_alert_pipeline(
@@ -70,27 +87,47 @@ def run_dummy_rest_alert_pipeline(
     repository=None,
     publisher=None,
 ):
+    print(
+        "[Test/Pipeline] START run_dummy_rest_alert_pipeline "
+        f"worker_id={worker_id}, repository_provided={repository is not None}, "
+        f"publisher_provided={publisher is not None}"
+    )
     repository = repository or FakeRepository()
     publisher = publisher or FakeWatchPublisher()
+    print("[Test/Pipeline] -> RestRuntimeService.from_model_path START")
     service = RestRuntimeService.from_model_path(repository=repository)
+    print("[Test/Pipeline] <- RestRuntimeService.from_model_path END")
 
+    print("[Test/Pipeline] -> service.evaluate_worker START")
     result = service.evaluate_worker(worker_id)
+    print(
+        "[Test/Pipeline] <- service.evaluate_worker END "
+        f"prediction={result.prediction}, should_rest={result.should_rest}"
+    )
     if result.should_rest and result.command is not None:
+        print("[Test/Pipeline] -> result.command.to_topic_and_payload START")
         topic, payload = result.command.to_topic_and_payload()
+        print(f"[Test/Pipeline] <- result.command.to_topic_and_payload END topic={topic}, payload={payload}")
+        print("[Test/Pipeline] -> publisher.publish START")
         publisher.publish(topic, payload)
-        return {
+        print("[Test/Pipeline] <- publisher.publish END")
+        output = {
             "result": result,
             "topic": topic,
             "payload": payload,
             "publisher": publisher,
         }
+        print(f"[Test/Pipeline] END run_dummy_rest_alert_pipeline output_topic={topic}")
+        return output
 
-    return {
+    output = {
         "result": result,
         "topic": None,
         "payload": None,
         "publisher": publisher,
     }
+    print("[Test/Pipeline] END run_dummy_rest_alert_pipeline no_alert=True")
+    return output
 
 
 class FakeCursor:
@@ -108,17 +145,28 @@ class FakeCursor:
     def execute(self, query, params=()):
         self.last_query = " ".join(query.lower().split())
         self.last_params = params
+        print(f"[Test/FakeCursor] execute query={self.last_query[:160]}, params={params}")
 
     def fetchone(self):
         query = self.last_query
+        print(f"[Test/FakeCursor] START fetchone query={query[:160]}")
         if "from th_trans" in query:
-            return self.rows["environment"]
+            row = self.rows["environment"]
+            print(f"[Test/FakeCursor] END fetchone source=environment row={row}")
+            return row
         if "from hb_trans" in query:
-            return self.rows["watch"]
+            row = self.rows["watch"]
+            print(f"[Test/FakeCursor] END fetchone source=watch row={row}")
+            return row
         if "join sensor s" in query and "where s.sensor_id" in query:
-            return self.rows["worker_by_sensor"]
+            row = self.rows["worker_by_sensor"]
+            print(f"[Test/FakeCursor] END fetchone source=worker_by_sensor row={row}")
+            return row
         if "from worker w" in query:
-            return self.rows["worker_profile"]
+            row = self.rows["worker_profile"]
+            print(f"[Test/FakeCursor] END fetchone source=worker_profile row={row}")
+            return row
+        print("[Test/FakeCursor] END fetchone row=None")
         return None
 
 
@@ -159,6 +207,7 @@ class FakeDbHandler:
         }
 
     def _get_connection(self):
+        print("[Test/FakeDbHandler] _get_connection")
         return FakeConnection(self.rows)
 
 
