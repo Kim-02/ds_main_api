@@ -128,6 +128,11 @@ async def assign_heart_band_to_worker(
             interval_ms,
         )
 
+        # 새 워치 등록 → 파이프라인 스레드 즉시 시작
+        watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
+        if watch_scheduler is not None:
+            watch_scheduler.register(sensor_id)
+
         return {
             "success": True,
             "message": "워치 등록 및 작업자 매핑이 완료되었습니다.",
@@ -181,6 +186,11 @@ async def unassign_worker_sensor(request: Request, dept_id: int) -> dict:
             mqtt_service.publish_unregister,
             sensor_id,
         )
+
+    # 워치 해제 → 파이프라인 스레드 중지
+    watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
+    if watch_scheduler is not None and sensor_id:
+        watch_scheduler.unregister(sensor_id)
 
     return {
         "success": True,

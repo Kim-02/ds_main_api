@@ -200,6 +200,25 @@ class WatchPipelineScheduler:
         )
         logger.info("[WatchScheduler] 휴식 예측 서비스 초기화 완료")
 
+    def register(self, sensor_id: str) -> None:
+        """새 워치가 동적으로 등록될 때 호출 — 즉시 스레드를 시작한다."""
+        logger.info("[WatchScheduler] 동적 등록 sensor_id=%s", sensor_id)
+        if self._rest_service is None:
+            logger.warning(
+                "[WatchScheduler] 서비스 미초기화 — sensor_id=%s 스레드 시작 불가", sensor_id
+            )
+            return
+        self._start_runner(sensor_id)
+
+    def unregister(self, sensor_id: str) -> None:
+        """워치 매핑이 해제될 때 호출 — 해당 스레드를 중지한다."""
+        runner = self._runners.pop(sensor_id, None)
+        if runner is None:
+            logger.warning("[WatchScheduler] 해제 요청 — 실행 중이 아님 sensor_id=%s", sensor_id)
+            return
+        runner.stop()
+        logger.info("[WatchScheduler] 동적 해제 완료 sensor_id=%s", sensor_id)
+
     def _start_runner(self, sensor_id: str):
         if sensor_id in self._runners:
             logger.warning("[WatchScheduler] 이미 실행 중 sensor_id=%s", sensor_id)
