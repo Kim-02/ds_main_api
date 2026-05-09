@@ -634,9 +634,10 @@ class DatabaseHandler:
         humidity: float,
         ts: Any = None,
     ) -> bool:
-        """
-        temp_humidity 센서 측정값 저장.
-        미등록 센서이면 저장하지 않는다.
+        """온습도 측정값 저장 (sensor_id 문자열 기준).
+
+        복합 PK(sen_id, time) 중복 시 temp/humid를 덮어씁니다.
+        미등록 센서이면 저장하지 않습니다.
         """
         try:
             with self._get_connection() as conn:
@@ -644,26 +645,17 @@ class DatabaseHandler:
                     sen_id = self._get_sen_id_by_sensor_id(cursor, sensor_id)
                     if sen_id is None:
                         logging.warning("미등록 온습도 센서 telemetry 무시: sensor_id=%s", sensor_id)
-                        conn.rollback()
                         return False
 
                     cursor.execute(
                         """
-                        INSERT INTO th_trans (
-                            sen_id,
-                            time,
-                            temp,
-                            humid
-                        ) VALUES (
-                            %s, %s, %s, %s
-                        )
+                        INSERT INTO th_trans (sen_id, time, temp, humid)
+                        VALUES (%s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            temp  = VALUES(temp),
+                            humid = VALUES(humid)
                         """,
-                        (
-                            sen_id,
-                            self._parse_to_mysql_time(ts),
-                            temperature,
-                            humidity,
-                        ),
+                        (sen_id, self._parse_to_mysql_time(ts), temperature, humidity),
                     )
 
                 conn.commit()
@@ -679,9 +671,10 @@ class DatabaseHandler:
         hr: float,
         ts: Any = None,
     ) -> bool:
-        """
-        heart_band 심박 측정값 저장.
-        미등록 센서이면 저장하지 않는다.
+        """심박 측정값 저장 (sensor_id 문자열 기준).
+
+        복합 PK(sen_id, time) 중복 시 hr을 덮어씁니다.
+        미등록 센서이면 저장하지 않습니다.
         """
         try:
             with self._get_connection() as conn:
@@ -689,24 +682,16 @@ class DatabaseHandler:
                     sen_id = self._get_sen_id_by_sensor_id(cursor, sensor_id)
                     if sen_id is None:
                         logging.warning("미등록 심박 센서 telemetry 무시: sensor_id=%s", sensor_id)
-                        conn.rollback()
                         return False
 
                     cursor.execute(
                         """
-                        INSERT INTO hb_trans (
-                            sen_id,
-                            time,
-                            hr
-                        ) VALUES (
-                            %s, %s, %s
-                        )
+                        INSERT INTO hb_trans (sen_id, time, hr)
+                        VALUES (%s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            hr = VALUES(hr)
                         """,
-                        (
-                            sen_id,
-                            self._parse_to_mysql_time(ts),
-                            hr,
-                        ),
+                        (sen_id, self._parse_to_mysql_time(ts), hr),
                     )
 
                 conn.commit()
@@ -715,6 +700,118 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("save_heart_rate_telemetry 오류: %s", e)
             return False
+
+    def insert_th_trans(
+        self,
+        sen_id: int,
+        time_val: Any = None,
+        temp: float = None,
+        humid: float = None,
+    ) -> bool:
+        """온습도 측정값을 th_trans에 직접 저장 (sen_id int 기준).
+
+        복합 PK(sen_id, time) 중복 시 temp/humid를 덮어씁니다.
+        sensor_service._handle_sensor_data_topic() 에서 호출됩니다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO th_trans (sen_id, time, temp, humid)
+                        VALUES (%s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            temp  = VALUES(temp),
+                            humid = VALUES(humid)
+                        """,
+                        (sen_id, self._parse_to_mysql_time(time_val), temp, humid),
+                    )
+                conn.commit()
+            return True
+
+        except Exception as e:
+            logging.error("insert_th_trans 오류 | sen_id=%s | error=%s", sen_id, e)
+            return False
+
+    def insert_hb_trans(
+        self,
+        sen_id: int,
+        time_val: Any = None,
+        hr: float = None,
+    ) -> bool:
+        """심박 측정값을 hb_trans에 직접 저장 (sen_id int 기준).
+
+        복합 PK(sen_id, time) 중복 시 hr을 덮어씁니다.
+        sensor_service._handle_sensor_data_topic() 에서 호출됩니다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO hb_trans (sen_id, time, hr)
+                        VALUES (%s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            hr = VALUES(hr)
+                        """,
+                        (sen_id, self._parse_to_mysql_time(time_val), hr),
+                    )
+                conn.commit()
+            return True
+
+        except Exception as e:
+            logging.error("insert_hb_trans 오류 | sen_id=%s | error=%s", sen_id, e)
+            return False
+
+    def update_sensor_last_seen_by_id(self, sen_id: int) -> bool:
+        """센서 온라인 상태와 last_seen_at을 sen_id(int PK) 기준으로 갱신.
+
+        insert_th_trans / insert_hb_trans 직후에 호출됩니다.
+        기존 update_sensor_online()은 sensor_id(문자열) 기준이라 별도로 추가합니다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE sensor
+                        SET
+                            is_online    = 1,
+                            last_seen_at = NOW(),
+                            updated_at   = NOW()
+                        WHERE sen_id = %s
+                        """,
+                        (sen_id,),
+                    )
+                conn.commit()
+            return True
+
+        except Exception as e:
+            logging.error("update_sensor_last_seen_by_id 오류 | sen_id=%s | error=%s", sen_id, e)
+            return False
+
+    def get_sensor_by_mqtt_topic(self, topic: str) -> Optional[dict]:
+        """mqtt_topic 컬럼 값이 topic과 일치하는 센서 행을 반환.
+
+        sensor_id로 조회가 안 될 때의 fallback으로 사용됩니다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT *
+                        FROM sensor
+                        WHERE mqtt_topic = %s
+                        LIMIT 1
+                        """,
+                        (topic,),
+                    )
+                    return cursor.fetchone()
+
+        except Exception as e:
+            logging.error("get_sensor_by_mqtt_topic 오류: %s", e)
+            return None
 
     # ------------------------------------------------------------------
     # 카메라

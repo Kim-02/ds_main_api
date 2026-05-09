@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     mqtt_broker_port: int = 1883
     mqtt_username: str = ""
     mqtt_password: str = ""
+    mqtt_sensor_data_topics: list = ["sensor/+/+", "sensors/+/data"]
 
     # vLLM
     vllm_base_url: str = "http://localhost:8000/v1"
@@ -24,7 +25,15 @@ class Settings(BaseSettings):
     frame_buffer_minutes: int = 10
     yolo_model_path: str = "yolov8n.pt"
     yolo_confidence: float = 0.5
-    cctv_rtsp_url: str = ""          # RTSP URL 설정 시 VLM 파이프라인 자동 시작
+    cctv_rtsp_url: str = ""
+
+    # Fire pipeline (CCTV 화재 감지 전용)
+    fire_pipeline_enabled: bool = True
+    fire_pipeline_yolo_model_path: str = "0507_best.pt"
+    fire_pipeline_vllm_base_url: str = ""
+    fire_pipeline_vllm_model: str = ""
+    fire_pipeline_vllm_api_key: str = ""
+    fire_pipeline_rtsp_path: str = "/stream"
 
     # Detection defaults
     default_temp_threshold: float = 35.0
@@ -45,7 +54,7 @@ class Settings(BaseSettings):
 
     # mDNS Jetson 자기 방송
     mdns_service_type: str = "_jetsonhub._tcp.local."
-    mdns_service_name: str = "OnSafe Jetson" 
+    mdns_service_name: str = "OnSafe Jetson"
 
     # API
     api_host: str = "0.0.0.0"
