@@ -1,4 +1,11 @@
-"""등록된 heart_band 센서마다 스레드를 열어 주기적으로 휴식 권고 파이프라인을 실행한다."""
+"""등록된 heart_band 센서마다 스레드를 열어 주기적으로 휴식 권고 파이프라인을 실행한다.
+
+제어 신호 흐름:
+  1) 휴식 권고 alert_on 발행  (약한 → yellow / 강한·반드시 → red, 5초, 진동)
+  2) duration_ms(5초) 대기
+  3) alert_off 발행  (진동 해제)
+"""
+import json
 import logging
 import threading
 from datetime import datetime
@@ -8,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SEC = 30
 STALE_THRESHOLD_SEC = 15
+
+_ALERT_OFF_PAYLOAD = json.dumps({"command": "alert_off"})
 
 
 class WatchPipelineRunner:
@@ -55,12 +64,11 @@ class WatchPipelineRunner:
             self._stop_event.wait(self.interval_sec)
 
     def _run_once(self):
-        # 최근 15초 이내 갱신이 없으면 워치가 오프라인으로 간주하고 스킵
+        # 최근 15초 이내 갱신이 없으면 워치 오프라인으로 간주하고 스킵
         last_seen = self._repository.fetch_sensor_last_seen(self.sensor_id)
         if last_seen is None:
             return
-        elapsed = (datetime.now() - last_seen).total_seconds()
-        if elapsed > STALE_THRESHOLD_SEC:
+        if (datetime.now() - last_seen).total_seconds() > STALE_THRESHOLD_SEC:
             logger.info("[WatchPipeline] 워치 응답 없음 — 스킵 sensor_id=%s", self.sensor_id)
             return
 
@@ -72,9 +80,20 @@ class WatchPipelineRunner:
         if result.command is None:
             return
 
-        topic, payload = result.command.to_topic_and_payload()
-        self._mqtt_publish_fn(topic, payload)
+        topic, on_payload = result.command.to_topic_and_payload()
+
+        # 1) 제어 신호 ON  (약한→yellow 5초 진동 / 강한·반드시→red 5초 진동)
+        self._mqtt_publish_fn(topic, on_payload)
         logger.info("[WatchPipeline] 휴식 권고 발행 sensor_id=%s", self.sensor_id)
+
+        # 2) duration 동안 대기 (stop 요청 시 즉시 탈출)
+        duration_sec = result.command.duration_ms / 1000
+        stopped = self._stop_event.wait(duration_sec)
+
+        # 3) 제어 신호 OFF  (진동 해제) — stop 요청이 아닐 때만
+        if not stopped:
+            self._mqtt_publish_fn(topic, _ALERT_OFF_PAYLOAD)
+            logger.info("[WatchPipeline] 진동 해제 발행 sensor_id=%s", self.sensor_id)
 
 
 class WatchPipelineScheduler:

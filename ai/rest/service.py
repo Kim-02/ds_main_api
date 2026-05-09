@@ -50,7 +50,7 @@ class BandControlCommandBuilder:
         color: str = "yellow",
         vibration: bool = True,
         led: bool = True,
-        duration_ms: int = 5000,
+        duration_ms: int = 5000,   # alert_on 유지 시간 (ms) — 이후 runner가 alert_off 발행
         reset_after_ms: int = 5000,
     ):
         self.color = color
