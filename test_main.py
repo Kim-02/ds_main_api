@@ -4,7 +4,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ai.rest import DatabaseHandlerRestDataRepository
+from ai.rest import (
+    DEFAULT_MODEL_PATH,
+    BandControlCommandBuilder,
+    DatabaseHandlerRestDataRepository,
+    RestModelEngine,
+    RestRuntimeService,
+    WorkerRawInput,
+)
 from database.db_handler import DatabaseHandler
 
 
@@ -92,6 +99,48 @@ def fetch_worker_hr_data(db_handler: DatabaseHandler, dept_id: str | int) -> dic
     return result
 
 
+def build_raw_input_from_worker_hr_data(
+    *,
+    worker_id: str,
+    worker_hr_data: dict[str, Any],
+    hr: float,
+    temp_c: float,
+    humid: float,
+    work_duration_min: int,
+) -> WorkerRawInput:
+    print(
+        "[test_main] 모델 raw input 생성 시작 "
+        f"worker_id={worker_id}, hr={hr}, temp_c={temp_c}, humid={humid}, "
+        f"work_duration_min={work_duration_min}, worker_hr_data={worker_hr_data}"
+    )
+    raw = WorkerRawInput(
+        worker_id=str(worker_id),
+        hr=float(hr),
+        temp_c=float(temp_c),
+        humid=float(humid),
+        age=_required_int(worker_hr_data, "age"),
+        gender=_coerce_gender(worker_hr_data.get("gender")),
+        height_cm=_required_float(worker_hr_data, "height_cm"),
+        weight_kg=_required_float(worker_hr_data, "weight_kg"),
+        work_duration_min=int(work_duration_min),
+        elderly_flag=_int_flag(worker_hr_data.get("elderly_flag")),
+        heart_disease=_int_flag(worker_hr_data.get("heart_disease")),
+        hypertension=_int_flag(worker_hr_data.get("hypertension")),
+        other_disease=_int_flag(worker_hr_data.get("other_disease")),
+        baseline_hr=_optional_float(worker_hr_data.get("baseline_hr")),
+    )
+    print(f"[test_main] 모델 raw input 생성 완료 raw={raw}")
+    return raw
+
+
+def run_rest_model(raw: WorkerRawInput) -> dict[str, Any]:
+    print(f"[test_main] 회귀모델 실행 시작 model_path={DEFAULT_MODEL_PATH}")
+    engine = RestModelEngine(model_path=str(DEFAULT_MODEL_PATH))
+    prediction = engine.predict(raw)
+    print(f"[test_main] 회귀모델 실행 완료 prediction={prediction}")
+    return prediction
+
+
 def run_worker_hr_data_pipeline(sensor_id: str) -> dict[str, Any] | None:
     print(f"[test_main] 파이프라인 시작 sensor_id={sensor_id}")
     load_dotenv()
@@ -111,10 +160,61 @@ def run_worker_hr_data_pipeline(sensor_id: str) -> dict[str, Any] | None:
     worker_hr_data = fetch_worker_hr_data(db_handler, worker_id)
     print(f"[test_main] 2단계 완료 worker_hr_data={worker_hr_data}")
 
+    if worker_hr_data is None:
+        output = {
+            "sensor_id": sensor_id,
+            "worker_id": worker_id,
+            "worker_hr_data": None,
+            "raw_input": None,
+            "prediction": None,
+            "command": None,
+        }
+        print(
+            "[test_main] 파이프라인 종료: worker_hr_data 없음 output="
+            + json.dumps(output, ensure_ascii=False, default=str, indent=2)
+        )
+        return output
+
+    print("[test_main] 3단계: 온습도/심박/작업시간 조회 시작")
+    environment = repository.fetch_environment(worker_id)
+    watch = repository.fetch_watch(worker_id)
+    profile = repository.fetch_worker_profile(worker_id)
+    print(
+        "[test_main] 3단계 완료 "
+        f"environment={environment}, watch={watch}, profile_work_duration_min={profile.work_duration_min}"
+    )
+
+    print("[test_main] 4단계: 회귀모델 입력 생성 시작")
+    raw_input = build_raw_input_from_worker_hr_data(
+        worker_id=worker_id,
+        worker_hr_data=worker_hr_data,
+        hr=watch.hr,
+        temp_c=environment.temp_c,
+        humid=environment.humid,
+        work_duration_min=profile.work_duration_min,
+    )
+    print(f"[test_main] 4단계 완료 raw_input={raw_input}")
+
+    print("[test_main] 5단계: 회귀모델 예측 시작")
+    prediction = run_rest_model(raw_input)
+    print(f"[test_main] 5단계 완료 prediction={prediction}")
+
+    print("[test_main] 6단계: 워치 알림 명령 생성 여부 판단 시작")
+    command = None
+    if RestRuntimeService.should_send_rest_command(prediction):
+        command = BandControlCommandBuilder().build(profile.target_topic).to_dict()
+    print(f"[test_main] 6단계 완료 command={command}")
+
     output = {
         "sensor_id": sensor_id,
         "worker_id": worker_id,
         "worker_hr_data": worker_hr_data,
+        "environment": environment,
+        "watch": watch,
+        "work_duration_min": profile.work_duration_min,
+        "raw_input": raw_input,
+        "prediction": prediction,
+        "command": command,
     }
     print(
         "[test_main] 파이프라인 완료 output="
@@ -123,9 +223,53 @@ def run_worker_hr_data_pipeline(sensor_id: str) -> dict[str, Any] | None:
     return output
 
 
+def _required_int(row: dict[str, Any], key: str) -> int:
+    value = row.get(key)
+    if value in (None, ""):
+        raise ValueError(f"worker_hr_data.{key} 값이 필요합니다.")
+    return int(value)
+
+
+def _required_float(row: dict[str, Any], key: str) -> float:
+    value = row.get(key)
+    if value in (None, ""):
+        raise ValueError(f"worker_hr_data.{key} 값이 필요합니다.")
+    return float(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _int_flag(value: Any) -> int:
+    if value in (None, ""):
+        return 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1"}:
+            return 1
+        if normalized in {"false", "no", "n", "0"}:
+            return 0
+    return 1 if int(value) else 0
+
+
+def _coerce_gender(value: Any) -> int:
+    if value in (None, ""):
+        raise ValueError("worker_hr_data.gender 값이 필요합니다.")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"male", "m", "man", "남", "남자", "1"}:
+            return 1
+        if normalized in {"female", "f", "woman", "여", "여자", "0"}:
+            return 0
+    return int(value)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="DB에서 센서 ID로 연결된 작업자를 찾고 worker_hr_data까지 조회합니다."
+        description="DB에서 센서 ID로 연결된 작업자를 찾고 worker_hr_data 기반 회귀모델 예측까지 실행합니다."
     )
     parser.add_argument(
         "sensor_id",
@@ -156,7 +300,8 @@ def main() -> None:
     print(
         "[test_main] 결과: "
         f"sensor_id={args.sensor_id}, worker_id={result['worker_id']}, "
-        f"worker_hr_data_id={result['worker_hr_data'].get('worker_hr_data_id')}"
+        f"worker_hr_data_id={result['worker_hr_data'].get('worker_hr_data_id')}, "
+        f"prediction={result['prediction']}"
     )
 
 
