@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import paho.mqtt.client as mqtt
+
 from ai.rest import (
     DEFAULT_MODEL_PATH,
     BandControlCommandBuilder,
@@ -208,6 +210,14 @@ def run_worker_hr_data_pipeline(sensor_id: str) -> dict[str, Any] | None:
         ).to_dict()
     print(f"[test_main] 6단계 완료 command={command}")
 
+    print("[test_main] 7단계: 워치 제어정보 MQTT 송신 시작")
+    publish_result = None
+    if command is None:
+        print("[test_main] 7단계 스킵: 보낼 command가 없습니다.")
+    else:
+        publish_result = publish_watch_command(command)
+    print(f"[test_main] 7단계 완료 publish_result={publish_result}")
+
     output = {
         "sensor_id": sensor_id,
         "worker_id": worker_id,
@@ -218,12 +228,62 @@ def run_worker_hr_data_pipeline(sensor_id: str) -> dict[str, Any] | None:
         "raw_input": raw_input,
         "prediction": prediction,
         "command": command,
+        "publish_result": publish_result,
     }
     print(
         "[test_main] 파이프라인 완료 output="
         + json.dumps(output, ensure_ascii=False, default=str, indent=2)
     )
     return output
+
+
+def publish_watch_command(command: dict[str, Any]) -> dict[str, Any]:
+    print(f"[test_main] publish_watch_command 시작 command={command}")
+    topic = command.get("target_topic")
+    if not topic:
+        raise ValueError("command.target_topic 값이 없어 MQTT topic을 만들 수 없습니다.")
+
+    payload_dict = dict(command)
+    payload_dict.pop("target_topic", None)
+    payload = json.dumps(payload_dict, ensure_ascii=False)
+
+    broker_host = os.getenv("MQTT_BROKER_HOST", "localhost")
+    broker_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+    username = os.getenv("MQTT_USERNAME", "")
+    password = os.getenv("MQTT_PASSWORD", "")
+
+    print(
+        "[test_main] MQTT 연결 시작 "
+        f"host={broker_host}, port={broker_port}, username_set={bool(username)}"
+    )
+    client = mqtt.Client()
+    if username:
+        client.username_pw_set(username, password or None)
+
+    try:
+        client.connect(broker_host, broker_port, 60)
+        client.loop_start()
+        print(f"[test_main] MQTT publish 시작 topic={topic}, payload={payload}")
+        info = client.publish(topic, payload)
+        info.wait_for_publish(timeout=5)
+        rc = getattr(info, "rc", None)
+        if rc not in (None, mqtt.MQTT_ERR_SUCCESS):
+            raise RuntimeError(f"MQTT publish 실패 rc={rc}")
+        result = {
+            "topic": topic,
+            "payload": payload_dict,
+            "rc": rc,
+            "published": True,
+        }
+        print(f"[test_main] MQTT publish 완료 result={result}")
+        return result
+    finally:
+        try:
+            client.loop_stop()
+            client.disconnect()
+            print("[test_main] MQTT 연결 종료")
+        except Exception as e:
+            print(f"[test_main] MQTT 종료 중 오류: {type(e).__name__}: {e}")
 
 
 def _required_int(row: dict[str, Any], key: str) -> int:
