@@ -1,8 +1,10 @@
-"""paho-mqtt 기반 센서 서비스 — sensors/+/status, sensors/+/telemetry 구독."""
+"""paho-mqtt 기반 센서 서비스 — sensors/+/status, sensors/+/telemetry 구독.
+
+수신한 센서 데이터는 DB에 저장만 한다.
+휴식 권고 판단은 WatchPipelineScheduler(스레드 per 워치)가 담당한다.
+"""
 import json
 import threading
-import time
-from collections import defaultdict, deque
 from datetime import datetime
 from typing import Optional
 
@@ -21,26 +23,6 @@ class MqttSensorService:
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
-
-        self.hr_windows = defaultdict(lambda: deque(maxlen=10))
-        self.high_hr_start_times: dict = {}
-        self.rest_repository = None
-        self.rest_runtime_service = None
-        self._init_rest_runtime()
-
-    def _init_rest_runtime(self):
-        try:
-            from ai.rest import DatabaseHandlerRestDataRepository, RestRuntimeService
-
-            self.rest_repository = DatabaseHandlerRestDataRepository(self.db_handler)
-            self.rest_runtime_service = RestRuntimeService.from_model_path(
-                repository=self.rest_repository,
-            )
-            print("[MQTT Sensor] 휴식 예측 모델 로드 완료")
-        except Exception as e:
-            self.rest_repository = None
-            self.rest_runtime_service = None
-            print(f"[MQTT Sensor] 휴식 예측 모델 비활성화: {e}")
 
     def start(self):
         if self._running:
@@ -139,43 +121,6 @@ class MqttSensorService:
             )
         except Exception as e:
             print(f"[MQTT Sensor] 심박 저장 실패: {e}")
-
-        self._check_heart_rate_alert(sensor_id, hr)
-        self._check_rest_recommendation(sensor_id)
-
-    def _check_heart_rate_alert(self, sensor_id: str, hr: float):
-        window = self.hr_windows[sensor_id]
-        window.append(hr)
-        avg_hr = sum(window) / len(window)
-
-        if avg_hr >= 72:
-            if sensor_id not in self.high_hr_start_times:
-                self.high_hr_start_times[sensor_id] = time.time()
-            duration = time.time() - self.high_hr_start_times[sensor_id]
-            if duration >= 5:
-                self.publish_alert(sensor_id=sensor_id, color="yellow", vibration=True, led=True)
-                self.high_hr_start_times.pop(sensor_id, None)
-        else:
-            self.high_hr_start_times.pop(sensor_id, None)
-
-    def _check_rest_recommendation(self, sensor_id: str):
-        if self.rest_runtime_service is None or self.rest_repository is None:
-            return
-
-        try:
-            worker_id = self.rest_repository.find_worker_id_by_sensor_id(sensor_id)
-            if not worker_id:
-                return
-
-            result = self.rest_runtime_service.evaluate_worker(worker_id)
-            if not result.should_rest or result.command is None:
-                return
-
-            topic, payload = result.command.to_topic_and_payload()
-            self.client.publish(topic, payload)
-            print(f"[MQTT Sensor] 휴식 권고 발행 sensor_id={sensor_id}")
-        except Exception as e:
-            print(f"[MQTT Sensor] 휴식 예측 오류: {e}")
 
     # ------------------------------------------------------------------
     # Publish 명령
