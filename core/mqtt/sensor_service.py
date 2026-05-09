@@ -101,6 +101,7 @@ class MqttSensorService:
             self.db_handler.save_sensor_telemetry(
                 sensor_id=sensor_id, temperature=temp, humidity=humid, ts=datetime.now()
             )
+            print(f"[MQTT Sensor] 온습도 업데이트 sensor_id={sensor_id} temp={temp} humid={humid}")
         except Exception as e:
             print(f"[MQTT Sensor] 온습도 저장 실패: {e}")
 
@@ -119,6 +120,7 @@ class MqttSensorService:
             self.db_handler.save_heart_rate_telemetry(
                 sensor_id=sensor_id, hr=hr, ts=datetime.now()
             )
+            print(f"[MQTT Sensor] 심박 업데이트 sensor_id={sensor_id} hr={hr}")
         except Exception as e:
             print(f"[MQTT Sensor] 심박 저장 실패: {e}")
 
