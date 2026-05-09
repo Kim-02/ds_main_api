@@ -48,7 +48,7 @@ def register_sensors(req: SensorRegisterReq, request: Request):
         mqtt_svc.publish_register(
             sensor_id=sensor["sensor_id"],
             site_id=f"jetson-{jetson_id:02d}",
-            interval_ms=5000,
+            interval_ms=3000,
         )
 
     return {"status": "success", "message": f"{len(selected)}개 센서 등록 완료"}
