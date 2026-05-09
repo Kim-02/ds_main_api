@@ -202,7 +202,10 @@ def run_worker_hr_data_pipeline(sensor_id: str) -> dict[str, Any] | None:
     print("[test_main] 6단계: 워치 알림 명령 생성 여부 판단 시작")
     command = None
     if RestRuntimeService.should_send_rest_command(prediction):
-        command = BandControlCommandBuilder().build(profile.target_topic).to_dict()
+        command = BandControlCommandBuilder().build_for_prediction(
+            profile.target_topic,
+            prediction,
+        ).to_dict()
     print(f"[test_main] 6단계 완료 command={command}")
 
     output = {

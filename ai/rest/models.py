@@ -38,7 +38,7 @@ class BandControlCommand:
     vibration: bool = True
     led: bool = True
     duration_ms: int = 5000
-    reset_after_ms: int = 15000
+    reset_after_ms: int = 5000
 
     def to_dict(self, include_target_topic: bool = True) -> Dict[str, Any]:
         print(

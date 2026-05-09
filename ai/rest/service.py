@@ -26,6 +26,12 @@ REST_REQUIRED_RESULTS = {
     FINAL_WEAK_REST,
 }
 
+REST_COMMAND_COLORS = {
+    FINAL_WEAK_REST: "yellow",
+    FINAL_STRONG_REST: "red",
+    FINAL_FORCE_REST: "red",
+}
+
 
 class RestDataRepository(Protocol):
     def fetch_environment(self, worker_id: str) -> EnvironmentSample:
@@ -45,7 +51,7 @@ class BandControlCommandBuilder:
         vibration: bool = True,
         led: bool = True,
         duration_ms: int = 5000,
-        reset_after_ms: int = 15000,
+        reset_after_ms: int = 5000,
     ):
         self.color = color
         self.vibration = vibration
@@ -64,6 +70,25 @@ class BandControlCommandBuilder:
             reset_after_ms=self.reset_after_ms,
         )
         print(f"[RestCommandBuilder] END build command={command.to_dict()}")
+        return command
+
+    def build_for_prediction(self, target_topic: str, prediction: Dict[str, Any]) -> BandControlCommand:
+        result = prediction.get("result")
+        color = REST_COMMAND_COLORS.get(result, self.color)
+        print(
+            "[RestCommandBuilder] START build_for_prediction "
+            f"target_topic={target_topic}, result={result}, color={color}, "
+            f"duration_ms={self.duration_ms}, reset_after_ms={self.reset_after_ms}"
+        )
+        command = BandControlCommand(
+            target_topic=target_topic,
+            color=color,
+            vibration=self.vibration,
+            led=self.led,
+            duration_ms=self.duration_ms,
+            reset_after_ms=self.reset_after_ms,
+        )
+        print(f"[RestCommandBuilder] END build_for_prediction command={command.to_dict()}")
         return command
 
 
@@ -153,7 +178,7 @@ class RestRuntimeService:
             f"result={prediction.get('result')}, should_send={should_send}"
         )
         if should_send:
-            command = self.command_builder.build(profile.target_topic)
+            command = self.command_builder.build_for_prediction(profile.target_topic, prediction)
 
         result = RestRuntimeResult(
             worker_id=profile.worker_id,
