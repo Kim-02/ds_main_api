@@ -41,36 +41,16 @@ class BandControlCommand:
     reset_after_ms: int = 5000
 
     def to_dict(self, include_target_topic: bool = True) -> Dict[str, Any]:
-        print(
-            "[BandControlCommand] START to_dict "
-            f"include_target_topic={include_target_topic}, target_topic={self.target_topic}"
-        )
         data = asdict(self)
         if not include_target_topic:
             data.pop("target_topic", None)
-        print(f"[BandControlCommand] END to_dict data={data}")
         return data
 
     def to_json(self, include_target_topic: bool = True) -> str:
-        print(
-            "[BandControlCommand] START to_json "
-            f"include_target_topic={include_target_topic}"
-        )
-        payload = json.dumps(
-            self.to_dict(include_target_topic=include_target_topic),
-            ensure_ascii=False,
-        )
-        print(f"[BandControlCommand] END to_json payload={payload}")
-        return payload
+        return json.dumps(self.to_dict(include_target_topic=include_target_topic), ensure_ascii=False)
 
     def to_topic_and_payload(self) -> tuple[str, str]:
-        print(f"[BandControlCommand] START to_topic_and_payload target_topic={self.target_topic}")
-        payload = self.to_json(include_target_topic=False)
-        print(
-            "[BandControlCommand] END to_topic_and_payload "
-            f"topic={self.target_topic}, payload={payload}"
-        )
-        return self.target_topic, payload
+        return self.target_topic, self.to_json(include_target_topic=False)
 
 
 @dataclass(frozen=True)
@@ -81,18 +61,9 @@ class RestRuntimeResult:
 
     @property
     def should_rest(self) -> bool:
-        result = self.command is not None
-        print(f"[RestRuntimeResult] should_rest worker_id={self.worker_id}, result={result}")
-        return result
+        return self.command is not None
 
     def command_json(self, include_target_topic: bool = True) -> Optional[str]:
-        print(
-            "[RestRuntimeResult] START command_json "
-            f"worker_id={self.worker_id}, include_target_topic={include_target_topic}"
-        )
         if self.command is None:
-            print("[RestRuntimeResult] END command_json payload=None")
             return None
-        payload = self.command.to_json(include_target_topic=include_target_topic)
-        print(f"[RestRuntimeResult] END command_json payload={payload}")
-        return payload
+        return self.command.to_json(include_target_topic=include_target_topic)

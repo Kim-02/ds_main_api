@@ -1,13 +1,4 @@
-"""등록된 heart_band 센서마다 스레드를 열어 주기적으로 휴식 권고 파이프라인을 실행한다.
-
-흐름 (스레드 1개 = 워치 1개):
-  loop {
-    STEP1  sensor_id → worker_id  (DB)
-    STEP2  온습도 + 심박 + 작업자 정보 조회 → 회귀모델 예측  (RestRuntimeService)
-    STEP3  휴식 권고가 필요하면 MQTT publish
-    sleep(interval_sec)
-  }
-"""
+"""등록된 heart_band 센서마다 스레드를 열어 주기적으로 휴식 권고 파이프라인을 실행한다."""
 import logging
 import threading
 from typing import Callable, Optional
@@ -36,8 +27,6 @@ class WatchPipelineRunner:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-    # ── 라이프사이클 ──────────────────────────────────────────────────────────
-
     def start(self):
         self._thread = threading.Thread(
             target=self._loop,
@@ -45,93 +34,36 @@ class WatchPipelineRunner:
             daemon=True,
         )
         self._thread.start()
-        logger.info(
-            "[WatchPipeline] 스레드 시작 sensor_id=%s interval_sec=%d",
-            self.sensor_id,
-            self.interval_sec,
-        )
+        logger.info("[WatchPipeline] 스레드 시작 sensor_id=%s", self.sensor_id)
 
     def stop(self):
         self._stop_event.set()
-        logger.info("[WatchPipeline] 종료 요청 sensor_id=%s", self.sensor_id)
-
-    # ── 내부 루프 ─────────────────────────────────────────────────────────────
+        logger.info("[WatchPipeline] 스레드 종료 sensor_id=%s", self.sensor_id)
 
     def _loop(self):
-        logger.info(
-            "[WatchPipeline] ─── 루프 진입 sensor_id=%s interval_sec=%d",
-            self.sensor_id,
-            self.interval_sec,
-        )
         while not self._stop_event.is_set():
             try:
                 self._run_once()
             except Exception as exc:
                 logger.error(
-                    "[WatchPipeline] 파이프라인 오류 sensor_id=%s: %s: %s",
+                    "[WatchPipeline] 파이프라인 오류 sensor_id=%s: %s",
                     self.sensor_id,
-                    type(exc).__name__,
                     exc,
                 )
             self._stop_event.wait(self.interval_sec)
-        logger.info("[WatchPipeline] ─── 루프 종료 sensor_id=%s", self.sensor_id)
 
     def _run_once(self):
-        sid = self.sensor_id
-        logger.info("[WatchPipeline] >>> START _run_once sensor_id=%s", sid)
-
-        # STEP1: sensor_id → worker_id
-        logger.info("[WatchPipeline] STEP1 START sensor_id→worker_id sensor_id=%s", sid)
-        worker_id = self._repository.find_worker_id_by_sensor_id(sid)
-        logger.info(
-            "[WatchPipeline] STEP1 END sensor_id=%s worker_id=%s",
-            sid,
-            worker_id,
-        )
+        worker_id = self._repository.find_worker_id_by_sensor_id(self.sensor_id)
         if not worker_id:
-            logger.info(
-                "[WatchPipeline] STEP1 SKIP sensor_id=%s: 연결된 작업자 없음 → 파이프라인 종료",
-                sid,
-            )
             return
 
-        # STEP2: 온습도 + 심박 + 작업자 정보 조회 → 모델 예측
-        logger.info(
-            "[WatchPipeline] STEP2 START evaluate_worker sensor_id=%s worker_id=%s",
-            sid,
-            worker_id,
-        )
         result = self._rest_service.evaluate_worker(worker_id)
-        logger.info(
-            "[WatchPipeline] STEP2 END sensor_id=%s worker_id=%s "
-            "prediction_result=%s should_rest=%s",
-            sid,
-            worker_id,
-            result.prediction.get("result"),
-            result.should_rest,
-        )
-
-        # STEP3: 휴식 권고 MQTT 발행
         if result.command is None:
-            logger.info(
-                "[WatchPipeline] STEP3 SKIP sensor_id=%s: 휴식 불필요",
-                sid,
-            )
-        else:
-            topic, payload = result.command.to_topic_and_payload()
-            logger.info(
-                "[WatchPipeline] STEP3 START MQTT publish sensor_id=%s topic=%s payload=%s",
-                sid,
-                topic,
-                payload,
-            )
-            self._mqtt_publish_fn(topic, payload)
-            logger.info(
-                "[WatchPipeline] STEP3 END MQTT publish 완료 sensor_id=%s",
-                sid,
-            )
+            return
 
-        logger.info("[WatchPipeline] <<< END _run_once sensor_id=%s", sid)
+        topic, payload = result.command.to_topic_and_payload()
+        self._mqtt_publish_fn(topic, payload)
+        logger.info("[WatchPipeline] 휴식 권고 발행 sensor_id=%s", self.sensor_id)
 
 
 class WatchPipelineScheduler:
@@ -150,78 +82,49 @@ class WatchPipelineScheduler:
         self._repository = None
         self._rest_service = None
 
-    # ── 라이프사이클 ──────────────────────────────────────────────────────────
-
     def start(self):
         logger.info("[WatchScheduler] 스케줄러 시작")
-
         try:
             self._init_service()
         except Exception as exc:
-            logger.error("[WatchScheduler] 서비스 초기화 실패 (스케줄러 비활성화): %s", exc)
+            logger.error("[WatchScheduler] 서비스 초기화 실패: %s", exc)
             return
 
         sensors = self._db_handler.get_registered_sensor_rows()
         heart_bands = [s for s in sensors if s.get("sensor_type") == "heart_band"]
-        logger.info(
-            "[WatchScheduler] 등록된 heart_band 센서 수=%d 전체 센서 수=%d",
-            len(heart_bands),
-            len(sensors),
-        )
-
-        if not heart_bands:
-            logger.info("[WatchScheduler] heart_band 센서 없음 → 스레드 없이 종료")
-            return
-
         for sensor in heart_bands:
             sensor_id = sensor.get("sensor_id")
-            if not sensor_id:
-                logger.warning("[WatchScheduler] sensor_id 없는 센서 행 스킵: %s", sensor)
-                continue
-            self._start_runner(sensor_id)
-
-        logger.info("[WatchScheduler] 스레드 등록 완료 count=%d", len(self._runners))
+            if sensor_id:
+                self._start_runner(sensor_id)
 
     def stop(self):
-        logger.info("[WatchScheduler] 모든 스레드 종료 요청 count=%d", len(self._runners))
+        logger.info("[WatchScheduler] 스케줄러 종료")
         for runner in self._runners.values():
             runner.stop()
         self._runners.clear()
 
-    # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
-
-    def _init_service(self):
-        logger.info("[WatchScheduler] 휴식 예측 서비스 초기화 시작")
-        from ai.rest import DatabaseHandlerRestDataRepository, RestRuntimeService
-
-        self._repository = DatabaseHandlerRestDataRepository(self._db_handler)
-        self._rest_service = RestRuntimeService.from_model_path(
-            repository=self._repository,
-        )
-        logger.info("[WatchScheduler] 휴식 예측 서비스 초기화 완료")
-
     def register(self, sensor_id: str) -> None:
-        """새 워치가 동적으로 등록될 때 호출 — 즉시 스레드를 시작한다."""
-        logger.info("[WatchScheduler] 동적 등록 sensor_id=%s", sensor_id)
+        """새 워치 등록 시 호출 — 즉시 스레드를 시작한다."""
         if self._rest_service is None:
-            logger.warning(
-                "[WatchScheduler] 서비스 미초기화 — sensor_id=%s 스레드 시작 불가", sensor_id
-            )
+            logger.warning("[WatchScheduler] 서비스 미초기화 — sensor_id=%s 시작 불가", sensor_id)
             return
         self._start_runner(sensor_id)
 
     def unregister(self, sensor_id: str) -> None:
-        """워치 매핑이 해제될 때 호출 — 해당 스레드를 중지한다."""
+        """워치 매핑 해제 시 호출 — 해당 스레드를 중지한다."""
         runner = self._runners.pop(sensor_id, None)
-        if runner is None:
-            logger.warning("[WatchScheduler] 해제 요청 — 실행 중이 아님 sensor_id=%s", sensor_id)
-            return
-        runner.stop()
-        logger.info("[WatchScheduler] 동적 해제 완료 sensor_id=%s", sensor_id)
+        if runner:
+            runner.stop()
+
+    def _init_service(self):
+        from ai.rest import DatabaseHandlerRestDataRepository, RestRuntimeService
+
+        self._repository = DatabaseHandlerRestDataRepository(self._db_handler)
+        self._rest_service = RestRuntimeService.from_model_path(repository=self._repository)
+        logger.info("[WatchScheduler] 서비스 초기화 완료")
 
     def _start_runner(self, sensor_id: str):
         if sensor_id in self._runners:
-            logger.warning("[WatchScheduler] 이미 실행 중 sensor_id=%s", sensor_id)
             return
         runner = WatchPipelineRunner(
             sensor_id=sensor_id,
@@ -232,4 +135,3 @@ class WatchPipelineScheduler:
         )
         runner.start()
         self._runners[sensor_id] = runner
-        logger.info("[WatchScheduler] sensor_id=%s 파이프라인 스레드 등록 완료", sensor_id)

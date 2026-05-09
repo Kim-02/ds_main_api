@@ -34,8 +34,7 @@ class DatabaseHandlerRestDataRepository:
         self.default_weight_kg = default_weight_kg
         self.default_work_duration_min = default_work_duration_min
 
-    def fetch_environment(self, worker_id: str) -> EnvironmentSample:
-        print(f"[RestRepository] START fetch_environment worker_id={worker_id}")
+    def fetch_environment(self, _worker_id: str) -> EnvironmentSample:
         row = self._fetch_one(
             """
             SELECT
@@ -48,15 +47,12 @@ class DatabaseHandlerRestDataRepository:
             (),
             source_name="environment",
         )
-        sample = EnvironmentSample(
+        return EnvironmentSample(
             temp_c=_required_float(row, "temp_c"),
             humid=_required_float(row, "humid"),
         )
-        print(f"[RestRepository] END fetch_environment sample={sample}")
-        return sample
 
     def fetch_watch(self, worker_id: str) -> WatchSample:
-        print(f"[RestRepository] START fetch_watch worker_id={worker_id}")
         row = self._fetch_one(
             """
             SELECT
@@ -71,15 +67,12 @@ class DatabaseHandlerRestDataRepository:
             (_coerce_worker_id(worker_id),),
             source_name="watch",
         )
-        sample = WatchSample(
+        return WatchSample(
             hr=_required_float(row, "hr"),
             baseline_hr=_optional_float(row, "baseline_hr"),
         )
-        print(f"[RestRepository] END fetch_watch sample={sample}")
-        return sample
 
     def fetch_worker_profile(self, worker_id: str) -> WorkerProfile:
-        print(f"[RestRepository] START fetch_worker_profile worker_id={worker_id}")
         row = self._fetch_one(
             """
             SELECT
@@ -103,7 +96,7 @@ class DatabaseHandlerRestDataRepository:
             default=self.default_work_duration_min,
         )
 
-        profile = WorkerProfile(
+        return WorkerProfile(
             worker_id=worker_id_value,
             age=age,
             gender=_encode_gender(_pick(row, ("gender", "sex"), self.default_gender)),
@@ -116,11 +109,8 @@ class DatabaseHandlerRestDataRepository:
             other_disease=_to_int_flag(_pick(row, ("other_disease",), 0)),
             target_topic=_resolve_target_topic(row),
         )
-        print(f"[RestRepository] END fetch_worker_profile profile={profile}")
-        return profile
 
     def find_worker_id_by_sensor_id(self, sensor_id: str) -> Optional[str]:
-        print(f"[RestRepository] START find_worker_id_by_sensor_id sensor_id={sensor_id}")
         row = self._fetch_optional(
             """
             SELECT
@@ -134,14 +124,8 @@ class DatabaseHandlerRestDataRepository:
             (sensor_id,),
         )
         if not row:
-            print(f"[RestRepository] END find_worker_id_by_sensor_id sensor_id={sensor_id}, worker_id=None")
             return None
-        worker_id = str(row["dept_id"])
-        print(
-            "[RestRepository] END find_worker_id_by_sensor_id "
-            f"sensor_id={sensor_id}, worker_id={worker_id}"
-        )
-        return worker_id
+        return str(row["dept_id"])
 
     def _fetch_one(
         self,
@@ -150,12 +134,9 @@ class DatabaseHandlerRestDataRepository:
         *,
         source_name: str,
     ) -> dict[str, Any]:
-        print(f"[RestRepository] START _fetch_one source={source_name}, params={params}")
         row = self._fetch_optional(query, params)
         if row is None:
-            print(f"[RestRepository] END _fetch_one source={source_name}, row=None")
             raise LookupError(f"No {source_name} row found for params={params}")
-        print(f"[RestRepository] END _fetch_one source={source_name}, row={row}")
         return row
 
     def _fetch_optional(
@@ -163,51 +144,30 @@ class DatabaseHandlerRestDataRepository:
         query: str,
         params: tuple[Any, ...],
     ) -> Optional[dict[str, Any]]:
-        compact_query = " ".join(query.split())
-        print(
-            "[RestRepository] START _fetch_optional "
-            f"sql={compact_query[:180]}, params={params}"
-        )
         with self.db_handler._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 row = cursor.fetchone()
-        result = dict(row) if row else None
-        print(f"[RestRepository] END _fetch_optional row={result}")
-        return result
+        return dict(row) if row else None
 
 
 def _resolve_target_topic(row: dict[str, Any]) -> str:
-    print(f"[RestRepository] START _resolve_target_topic row_sensor_id={row.get('sensor_id')}, mqtt_topic={row.get('mqtt_topic')}")
     sensor_id = row.get("sensor_id")
     if sensor_id:
-        topic = f"sensors/{sensor_id}/alert"
-        print(f"[RestRepository] END _resolve_target_topic source=sensor_id topic={topic}")
-        return topic
+        return f"sensors/{sensor_id}/alert"
 
     mqtt_topic = str(row.get("mqtt_topic") or "").strip()
     if mqtt_topic:
         if mqtt_topic.endswith("/telemetry"):
-            topic = mqtt_topic[: -len("/telemetry")] + "/alert"
-            print(f"[RestRepository] END _resolve_target_topic source=mqtt_topic topic={topic}")
-            return topic
-        topic = mqtt_topic.rstrip("/") + "/alert"
-        print(f"[RestRepository] END _resolve_target_topic source=mqtt_topic topic={topic}")
-        return topic
+            return mqtt_topic[: -len("/telemetry")] + "/alert"
+        return mqtt_topic.rstrip("/") + "/alert"
 
-    print("[RestRepository] END _resolve_target_topic failed=no_sensor_topic")
     raise ValueError("작업자에게 매핑된 heart_band 센서가 없어 휴식 명령 topic을 만들 수 없습니다.")
 
 
 def _resolve_work_duration_min(row: dict[str, Any], *, default: int) -> int:
-    print(
-        "[RestRepository] START _resolve_work_duration_min "
-        f"work_duration_min={row.get('work_duration_min')}, default={default}"
-    )
     if "work_duration_min" in row and row["work_duration_min"] not in (None, ""):
-        result = int(_to_float(row["work_duration_min"], "work_duration_min"))
-        print(f"[RestRepository] END _resolve_work_duration_min source=column result={result}")
-        return result
+        return int(_to_float(row["work_duration_min"], "work_duration_min"))
 
     for key in ("work_start_at", "shift_start_at", "started_at"):
         value = row.get(key)
@@ -215,13 +175,9 @@ def _resolve_work_duration_min(row: dict[str, Any], *, default: int) -> int:
             continue
         start = _to_datetime(value)
         if start:
-            result = max(0, int((datetime.now() - start).total_seconds() // 60))
-            print(f"[RestRepository] END _resolve_work_duration_min source={key} result={result}")
-            return result
+            return max(0, int((datetime.now() - start).total_seconds() // 60))
 
-    result = int(default)
-    print(f"[RestRepository] END _resolve_work_duration_min source=default result={result}")
-    return result
+    return int(default)
 
 
 def _to_datetime(value: Any) -> Optional[datetime]:
@@ -253,7 +209,6 @@ def _pick(row: dict[str, Any], names: tuple[str, ...], default: Any = None) -> A
 def _required_value(row: dict[str, Any], column: str) -> Any:
     if column not in row:
         raise KeyError(f"Query result is missing required column '{column}'")
-
     value = row[column]
     if value is None:
         raise ValueError(f"Column '{column}' is null")
@@ -261,14 +216,12 @@ def _required_value(row: dict[str, Any], column: str) -> Any:
 
 
 def _required_float(row: dict[str, Any], column: str) -> float:
-    value = _required_value(row, column)
-    return _to_float(value, column)
+    return _to_float(_required_value(row, column), column)
 
 
 def _optional_float(row: dict[str, Any], column: str, default: float | None = None) -> Optional[float]:
     if column not in row:
         return default
-
     value = row[column]
     if value is None or value == "":
         return default
@@ -285,7 +238,6 @@ def _to_float(value: Any, column: str) -> float:
 def _to_int_flag(value: Any) -> int:
     if isinstance(value, bool):
         return int(value)
-
     text = str(value).strip().lower()
     if text in {"true", "t", "yes", "y"}:
         return 1
@@ -299,13 +251,11 @@ def _encode_gender(value: Any) -> int:
         return int(value)
     if isinstance(value, (int, float)):
         return int(value)
-
     text = str(value).strip().lower()
     if text in {"m", "male", "남", "남성"}:
         return 1
     if text in {"f", "female", "여", "여성"}:
         return 0
-
     try:
         return int(float(text))
     except ValueError:
