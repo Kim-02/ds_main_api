@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     frame_buffer_minutes: int = 10
     yolo_model_path: str = "yolov8n.pt"
     yolo_confidence: float = 0.5
+    cctv_rtsp_url: str = ""          # RTSP URL 설정 시 VLM 파이프라인 자동 시작
 
     # Detection defaults
     default_temp_threshold: float = 35.0

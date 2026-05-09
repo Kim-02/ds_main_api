@@ -1,0 +1,1 @@
+"""Fire detection pipeline modules."""

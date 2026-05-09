@@ -189,7 +189,32 @@ async def lifespan(app: FastAPI):
 
     logger.info("워치 파이프라인 스케줄러 시작 완료")
 
-    # 8. mDNS 자기 방송
+    # 8. CCTV VLM 파이프라인 — CCTV_RTSP_URL 설정 시 자동 시작
+    #
+    # YOLO로 fire/smoke/spark 감지 → MovementValidator(VLM) → SafetyAnalysisVlm(VLM)
+    # 분석 결과 3줄 텍스트를 WebSocket /ws/alerts 로 브로드캐스트한다.
+    app.state.vlm_runner = None
+    if settings.cctv_rtsp_url:
+        from ai.vlm.cctv_runner import CctvVlmRunner
+
+        def _on_vlm_result(text: str):
+            import asyncio
+            asyncio.run_coroutine_threadsafe(
+                ws_manager.broadcast({"type": "vlm_analysis", "text": text}),
+                main_loop,
+            )
+
+        vlm_runner = CctvVlmRunner(
+            rtsp_url=settings.cctv_rtsp_url,
+            on_result=_on_vlm_result,
+        )
+        vlm_runner.start()
+        app.state.vlm_runner = vlm_runner
+        logger.info("CCTV VLM 파이프라인 시작 완료 source=%s", settings.cctv_rtsp_url)
+    else:
+        logger.info("CCTV VLM 파이프라인 비활성화 (CCTV_RTSP_URL 미설정)")
+
+    # 9. mDNS 자기 방송
     #
     # 앱이 Jetson API 서버를 탐색할 수 있도록 Jetson 자체도 mDNS로 방송한다.
     aiozc, mdns_info = await _start_mdns_broadcast(current_ip)
@@ -203,6 +228,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── 종료 처리 ────────────────────────────────────────────────────────────
+
+    try:
+        if app.state.vlm_runner is not None:
+            app.state.vlm_runner.stop()
+    except Exception as e:
+        logger.warning("CCTV VLM 파이프라인 종료 중 오류: %s", e)
 
     try:
         watch_scheduler.stop()
