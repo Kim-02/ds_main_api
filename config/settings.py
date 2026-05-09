@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +50,17 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     debug: bool = False
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def parse_debug(cls, value):
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production", "false", "0", "no", "off"}:
+                return False
+            if normalized in {"debug", "dev", "development", "true", "1", "yes", "on"}:
+                return True
+        return value
 
 
 settings = Settings()
