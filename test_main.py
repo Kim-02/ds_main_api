@@ -1,3 +1,11 @@
+"""워치 파이프라인 통합 테스트.
+
+각 단계를 독립적인 함수로 분리해 실패 지점을 빠르게 파악할 수 있도록 한다.
+
+실행:
+    python test_main.py                  # 기본 sensor_id 사용
+    python test_main.py watch-1386       # 특정 sensor_id 지정
+"""
 import argparse
 import json
 import os
@@ -10,15 +18,16 @@ from ai.rest import (
     DEFAULT_MODEL_PATH,
     BandControlCommandBuilder,
     DatabaseHandlerRestDataRepository,
+    EnvironmentSample,
     RestModelEngine,
     RestRuntimeService,
+    WatchSample,
     WorkerRawInput,
 )
 from database.db_handler import DatabaseHandler
 
 
 DEFAULT_SENSOR_ID = "watch-1386"
-
 
 WORKER_HR_DATA_COLUMNS = (
     "worker_hr_data_id",
@@ -36,72 +45,97 @@ WORKER_HR_DATA_COLUMNS = (
     "updated_at",
 )
 
+# ─── ANSI 색상 (터미널 가독성) ─────────────────────────────────────────────────
+
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_BOLD = "\033[1m"
+_RESET = "\033[0m"
+
+
+def _pass(label: str, detail: str = "") -> None:
+    suffix = f" — {detail}" if detail else ""
+    print(f"{_GREEN}{_BOLD}[PASS]{_RESET} {label}{suffix}")
+
+
+def _fail(label: str, detail: str = "") -> None:
+    suffix = f" — {detail}" if detail else ""
+    print(f"{_RED}{_BOLD}[FAIL]{_RESET} {label}{suffix}")
+
+
+def _info(msg: str) -> None:
+    print(f"{_YELLOW}[INFO]{_RESET} {msg}")
+
+
+def _section(title: str) -> None:
+    bar = "─" * 60
+    print(f"\n{_BOLD}{bar}\n  {title}\n{bar}{_RESET}")
+
+
+# ─── 환경 / DB 헬퍼 ───────────────────────────────────────────────────────────
 
 def load_dotenv(path: str = ".env") -> None:
     env_path = Path(path)
     if not env_path.exists():
-        print(f"[test_main] .env 파일 없음: {env_path.resolve()}")
+        _info(f".env 파일 없음: {env_path.resolve()}")
         return
-
-    print(f"[test_main] .env 로드 시작: {env_path.resolve()}")
+    _info(f".env 로드: {env_path.resolve()}")
     for line in env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
-    print("[test_main] .env 로드 완료")
 
 
 def build_db_handler() -> DatabaseHandler:
-    print("[test_main] DB 핸들러 생성 시작")
-    handler = DatabaseHandler(
+    return DatabaseHandler(
         host=os.getenv("MARIADB_HOST", "127.0.0.1"),
         user=os.getenv("MARIADB_USER", "root"),
         password=os.getenv("MARIADB_PASSWORD", "ekthf123"),
         db_name=os.getenv("MARIADB_DB_NAME", "ON_SAFE"),
         port=int(os.getenv("MARIADB_PORT", "3306")),
     )
-    print(f"[test_main] DB 핸들러 생성 완료 config={handler.db_config | {'password': '***'}}")
-    return handler
 
 
-def find_worker_by_sensor_id(sensor_id: str) -> str | None:
-    print(f"[test_main] 센서 기반 작업자 조회 시작 sensor_id={sensor_id}")
-    load_dotenv()
+# ─── 파이프라인 서브 함수 ─────────────────────────────────────────────────────
 
-    db_handler = build_db_handler()
-    repository = DatabaseHandlerRestDataRepository(db_handler)
-
+def find_worker_id(repository: DatabaseHandlerRestDataRepository, sensor_id: str) -> str | None:
+    print(f"  [Pipeline] find_worker_id sensor_id={sensor_id}")
     worker_id = repository.find_worker_id_by_sensor_id(sensor_id)
-    print(f"[test_main] 센서 기반 작업자 조회 완료 sensor_id={sensor_id}, worker_id={worker_id}")
+    print(f"  [Pipeline] find_worker_id result worker_id={worker_id}")
     return worker_id
 
 
 def fetch_worker_hr_data(db_handler: DatabaseHandler, dept_id: str | int) -> dict[str, Any] | None:
-    print(f"[test_main] worker_hr_data 조회 시작 dept_id={dept_id}")
     columns = ", ".join(WORKER_HR_DATA_COLUMNS)
-    query = f"""
-        SELECT
-            {columns}
-        FROM worker_hr_data
-        WHERE dept_id = %s
-        LIMIT 1
-    """
-    compact_query = " ".join(query.split())
-    print(f"[test_main] worker_hr_data SQL={compact_query}, params=({dept_id},)")
-
+    query = f"SELECT {columns} FROM worker_hr_data WHERE dept_id = %s LIMIT 1"
+    print(f"  [Pipeline] fetch_worker_hr_data dept_id={dept_id}")
     with db_handler._get_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(query, (dept_id,))
             row = cursor.fetchone()
-
     result = dict(row) if row else None
-    print(f"[test_main] worker_hr_data 조회 완료 row={result}")
+    print(f"  [Pipeline] fetch_worker_hr_data result={result}")
     return result
 
 
-def build_raw_input_from_worker_hr_data(
+def fetch_environment(repository: DatabaseHandlerRestDataRepository, worker_id: str) -> EnvironmentSample:
+    print(f"  [Pipeline] fetch_environment worker_id={worker_id}")
+    env = repository.fetch_environment(worker_id)
+    print(f"  [Pipeline] fetch_environment result temp_c={env.temp_c} humid={env.humid}")
+    return env
+
+
+def fetch_watch_hr(repository: DatabaseHandlerRestDataRepository, worker_id: str) -> WatchSample:
+    print(f"  [Pipeline] fetch_watch_hr worker_id={worker_id}")
+    watch = repository.fetch_watch(worker_id)
+    print(f"  [Pipeline] fetch_watch_hr result hr={watch.hr}")
+    return watch
+
+
+def build_raw_input(
     *,
     worker_id: str,
     worker_hr_data: dict[str, Any],
@@ -111,9 +145,8 @@ def build_raw_input_from_worker_hr_data(
     work_duration_min: int,
 ) -> WorkerRawInput:
     print(
-        "[test_main] 모델 raw input 생성 시작 "
-        f"worker_id={worker_id}, hr={hr}, temp_c={temp_c}, humid={humid}, "
-        f"work_duration_min={work_duration_min}, worker_hr_data={worker_hr_data}"
+        f"  [Pipeline] build_raw_input worker_id={worker_id} "
+        f"hr={hr} temp_c={temp_c} humid={humid} work_duration_min={work_duration_min}"
     )
     raw = WorkerRawInput(
         worker_id=str(worker_id),
@@ -131,120 +164,24 @@ def build_raw_input_from_worker_hr_data(
         other_disease=_int_flag(worker_hr_data.get("other_disease")),
         baseline_hr=_optional_float(worker_hr_data.get("baseline_hr")),
     )
-    print(f"[test_main] 모델 raw input 생성 완료 raw={raw}")
+    print(f"  [Pipeline] build_raw_input result raw={raw}")
     return raw
 
 
 def run_rest_model(raw: WorkerRawInput) -> dict[str, Any]:
-    print(f"[test_main] 회귀모델 실행 시작 model_path={DEFAULT_MODEL_PATH}")
+    print(f"  [Pipeline] run_rest_model model_path={DEFAULT_MODEL_PATH}")
     engine = RestModelEngine(model_path=str(DEFAULT_MODEL_PATH))
     prediction = engine.predict(raw)
-    print(f"[test_main] 회귀모델 실행 완료 prediction={prediction}")
+    print(f"  [Pipeline] run_rest_model result prediction={prediction}")
     return prediction
 
 
-def run_worker_hr_data_pipeline(sensor_id: str) -> dict[str, Any] | None:
-    print(f"[test_main] 파이프라인 시작 sensor_id={sensor_id}")
-    load_dotenv()
-
-    db_handler = build_db_handler()
-    repository = DatabaseHandlerRestDataRepository(db_handler)
-
-    print("[test_main] 1단계: sensor_id로 worker.dept_id 조회 시작")
-    worker_id = repository.find_worker_id_by_sensor_id(sensor_id)
-    print(f"[test_main] 1단계 완료 worker_id={worker_id}")
-
-    if worker_id is None:
-        print(f"[test_main] 파이프라인 종료: sensor_id={sensor_id}에 연결된 작업자가 없습니다.")
-        return None
-
-    print("[test_main] 2단계: worker_hr_data 조회 시작")
-    worker_hr_data = fetch_worker_hr_data(db_handler, worker_id)
-    print(f"[test_main] 2단계 완료 worker_hr_data={worker_hr_data}")
-
-    if worker_hr_data is None:
-        output = {
-            "sensor_id": sensor_id,
-            "worker_id": worker_id,
-            "worker_hr_data": None,
-            "raw_input": None,
-            "prediction": None,
-            "command": None,
-        }
-        print(
-            "[test_main] 파이프라인 종료: worker_hr_data 없음 output="
-            + json.dumps(output, ensure_ascii=False, default=str, indent=2)
-        )
-        return output
-
-    print("[test_main] 3단계: 온습도/심박/작업시간 조회 시작")
-    environment = repository.fetch_environment(worker_id)
-    watch = repository.fetch_watch(worker_id)
-    profile = repository.fetch_worker_profile(worker_id)
-    print(
-        "[test_main] 3단계 완료 "
-        f"environment={environment}, watch={watch}, profile_work_duration_min={profile.work_duration_min}"
-    )
-
-    print("[test_main] 4단계: 회귀모델 입력 생성 시작")
-    raw_input = build_raw_input_from_worker_hr_data(
-        worker_id=worker_id,
-        worker_hr_data=worker_hr_data,
-        hr=watch.hr,
-        temp_c=environment.temp_c,
-        humid=environment.humid,
-        work_duration_min=profile.work_duration_min,
-    )
-    print(f"[test_main] 4단계 완료 raw_input={raw_input}")
-
-    print("[test_main] 5단계: 회귀모델 예측 시작")
-    prediction = run_rest_model(raw_input)
-    print(f"[test_main] 5단계 완료 prediction={prediction}")
-
-    print("[test_main] 6단계: 워치 알림 명령 생성 여부 판단 시작")
-    command = None
-    if RestRuntimeService.should_send_rest_command(prediction):
-        command = BandControlCommandBuilder().build_for_prediction(
-            profile.target_topic,
-            prediction,
-        ).to_dict()
-    print(f"[test_main] 6단계 완료 command={command}")
-
-    print("[test_main] 7단계: 워치 제어정보 MQTT 송신 시작")
-    publish_result = None
-    if command is None:
-        print("[test_main] 7단계 스킵: 보낼 command가 없습니다.")
-    else:
-        publish_result = publish_watch_command(command)
-    print(f"[test_main] 7단계 완료 publish_result={publish_result}")
-
-    output = {
-        "sensor_id": sensor_id,
-        "worker_id": worker_id,
-        "worker_hr_data": worker_hr_data,
-        "environment": environment,
-        "watch": watch,
-        "work_duration_min": profile.work_duration_min,
-        "raw_input": raw_input,
-        "prediction": prediction,
-        "command": command,
-        "publish_result": publish_result,
-    }
-    print(
-        "[test_main] 파이프라인 완료 output="
-        + json.dumps(output, ensure_ascii=False, default=str, indent=2)
-    )
-    return output
-
-
 def publish_watch_command(command: dict[str, Any]) -> dict[str, Any]:
-    print(f"[test_main] publish_watch_command 시작 command={command}")
     topic = command.get("target_topic")
     if not topic:
         raise ValueError("command.target_topic 값이 없어 MQTT topic을 만들 수 없습니다.")
 
-    payload_dict = dict(command)
-    payload_dict.pop("target_topic", None)
+    payload_dict = {k: v for k, v in command.items() if k != "target_topic"}
     payload = json.dumps(payload_dict, ensure_ascii=False)
 
     broker_host = os.getenv("MQTT_BROKER_HOST", "localhost")
@@ -253,8 +190,8 @@ def publish_watch_command(command: dict[str, Any]) -> dict[str, Any]:
     password = os.getenv("MQTT_PASSWORD", "")
 
     print(
-        "[test_main] MQTT 연결 시작 "
-        f"host={broker_host}, port={broker_port}, username_set={bool(username)}"
+        f"  [Pipeline] publish_watch_command topic={topic} "
+        f"host={broker_host}:{broker_port} payload={payload}"
     )
     client = mqtt.Client()
     if username:
@@ -263,28 +200,244 @@ def publish_watch_command(command: dict[str, Any]) -> dict[str, Any]:
     try:
         client.connect(broker_host, broker_port, 60)
         client.loop_start()
-        print(f"[test_main] MQTT publish 시작 topic={topic}, payload={payload}")
         info = client.publish(topic, payload)
         info.wait_for_publish(timeout=5)
         rc = getattr(info, "rc", None)
         if rc not in (None, mqtt.MQTT_ERR_SUCCESS):
             raise RuntimeError(f"MQTT publish 실패 rc={rc}")
-        result = {
-            "topic": topic,
-            "payload": payload_dict,
-            "rc": rc,
-            "published": True,
-        }
-        print(f"[test_main] MQTT publish 완료 result={result}")
+        result = {"topic": topic, "payload": payload_dict, "rc": rc, "published": True}
+        print(f"  [Pipeline] publish_watch_command result={result}")
         return result
     finally:
         try:
             client.loop_stop()
             client.disconnect()
-            print("[test_main] MQTT 연결 종료")
         except Exception as e:
-            print(f"[test_main] MQTT 종료 중 오류: {type(e).__name__}: {e}")
+            print(f"  [Pipeline] MQTT 종료 중 오류: {type(e).__name__}: {e}")
 
+
+# ─── 개별 테스트 함수 ─────────────────────────────────────────────────────────
+
+def test_db_connection(db_handler: DatabaseHandler) -> bool:
+    """[TEST 1] DB 연결 — 간단한 SELECT 1 로 연결 가능 여부 확인."""
+    _section("TEST 1 · DB 연결")
+    try:
+        with db_handler._get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1 AS ok")
+                row = cursor.fetchone()
+        ok = bool(row and row.get("ok") == 1)
+        if ok:
+            _pass("DB 연결", f"host={db_handler.db_config['host']}:{db_handler.db_config['port']}")
+        else:
+            _fail("DB 연결", f"SELECT 1 결과 이상: {row}")
+        return ok
+    except Exception as exc:
+        _fail("DB 연결", f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def test_sensor_worker_mapping(
+    repository: DatabaseHandlerRestDataRepository,
+    sensor_id: str,
+) -> tuple[bool, str | None]:
+    """[TEST 2] sensor_id → worker_id 매핑 확인."""
+    _section(f"TEST 2 · sensor→worker 매핑  sensor_id={sensor_id}")
+    try:
+        worker_id = find_worker_id(repository, sensor_id)
+        if worker_id is not None:
+            _pass("sensor→worker 매핑", f"sensor_id={sensor_id} → worker_id={worker_id}")
+            return True, worker_id
+        else:
+            _fail("sensor→worker 매핑", f"sensor_id={sensor_id} 에 연결된 작업자 없음")
+            return False, None
+    except Exception as exc:
+        _fail("sensor→worker 매핑", f"{type(exc).__name__}: {exc}")
+        return False, None
+
+
+def test_worker_hr_data(
+    db_handler: DatabaseHandler,
+    worker_id: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """[TEST 3] worker_hr_data 테이블 조회 — 건강/신체 정보 확인."""
+    _section(f"TEST 3 · worker_hr_data 조회  worker_id={worker_id}")
+    try:
+        data = fetch_worker_hr_data(db_handler, worker_id)
+        if data is not None:
+            _pass(
+                "worker_hr_data 조회",
+                f"age={data.get('age')} gender={data.get('gender')} "
+                f"height={data.get('height_cm')} weight={data.get('weight_kg')}",
+            )
+            return True, data
+        else:
+            _fail("worker_hr_data 조회", f"worker_id={worker_id} 에 해당하는 행 없음")
+            return False, None
+    except Exception as exc:
+        _fail("worker_hr_data 조회", f"{type(exc).__name__}: {exc}")
+        return False, None
+
+
+def test_environment_data(
+    repository: DatabaseHandlerRestDataRepository,
+    worker_id: str,
+) -> tuple[bool, EnvironmentSample | None]:
+    """[TEST 4] 온습도(th_trans) 최신 레코드 조회."""
+    _section(f"TEST 4 · 온습도 데이터  worker_id={worker_id}")
+    try:
+        env = fetch_environment(repository, worker_id)
+        _pass("온습도 조회", f"temp_c={env.temp_c} humid={env.humid}")
+        return True, env
+    except Exception as exc:
+        _fail("온습도 조회", f"{type(exc).__name__}: {exc}")
+        return False, None
+
+
+def test_watch_hr_data(
+    repository: DatabaseHandlerRestDataRepository,
+    worker_id: str,
+) -> tuple[bool, WatchSample | None]:
+    """[TEST 5] 심박(hb_trans) 최신 레코드 조회."""
+    _section(f"TEST 5 · 심박 데이터  worker_id={worker_id}")
+    try:
+        watch = fetch_watch_hr(repository, worker_id)
+        _pass("심박 조회", f"hr={watch.hr}")
+        return True, watch
+    except Exception as exc:
+        _fail("심박 조회", f"{type(exc).__name__}: {exc}")
+        return False, None
+
+
+def test_model_prediction(
+    worker_id: str,
+    worker_hr_data: dict[str, Any],
+    env: EnvironmentSample,
+    watch: WatchSample,
+    work_duration_min: int,
+) -> tuple[bool, dict[str, Any] | None]:
+    """[TEST 6] 회귀모델 예측 — WorkerRawInput 생성 후 예측."""
+    _section("TEST 6 · 회귀모델 예측")
+    try:
+        raw = build_raw_input(
+            worker_id=worker_id,
+            worker_hr_data=worker_hr_data,
+            hr=watch.hr,
+            temp_c=env.temp_c,
+            humid=env.humid,
+            work_duration_min=work_duration_min,
+        )
+        prediction = run_rest_model(raw)
+        _pass(
+            "회귀모델 예측",
+            f"result={prediction.get('result')} score={prediction.get('score')}",
+        )
+        return True, prediction
+    except Exception as exc:
+        _fail("회귀모델 예측", f"{type(exc).__name__}: {exc}")
+        return False, None
+
+
+def test_mqtt_publish(
+    prediction: dict[str, Any],
+    target_topic: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """[TEST 7] MQTT 발행 — 휴식 권고 필요 시 워치에 명령 전송."""
+    _section("TEST 7 · MQTT 발행")
+    try:
+        if not RestRuntimeService.should_send_rest_command(prediction):
+            _info(
+                f"MQTT 발행 스킵 — 휴식 불필요 result={prediction.get('result')}"
+            )
+            return True, None
+
+        command = BandControlCommandBuilder().build_for_prediction(target_topic, prediction).to_dict()
+        result = publish_watch_command(command)
+        _pass("MQTT 발행", f"topic={result['topic']} rc={result['rc']}")
+        return True, result
+    except Exception as exc:
+        _fail("MQTT 발행", f"{type(exc).__name__}: {exc}")
+        return False, None
+
+
+# ─── 전체 테스트 실행기 ───────────────────────────────────────────────────────
+
+def run_all_tests(sensor_id: str) -> None:
+    """모든 테스트를 순서대로 실행하고 PASS/FAIL 요약을 출력한다."""
+    load_dotenv()
+    db_handler = build_db_handler()
+    repository = DatabaseHandlerRestDataRepository(db_handler)
+
+    results: dict[str, bool] = {}
+
+    # TEST 1
+    results["DB 연결"] = test_db_connection(db_handler)
+    if not results["DB 연결"]:
+        _section("중단: DB 연결 실패 — 이후 테스트 불가")
+        _print_summary(results)
+        return
+
+    # TEST 2
+    ok2, worker_id = test_sensor_worker_mapping(repository, sensor_id)
+    results["sensor→worker 매핑"] = ok2
+    if not ok2:
+        _print_summary(results)
+        return
+
+    # TEST 3
+    ok3, worker_hr_data = test_worker_hr_data(db_handler, worker_id)
+    results["worker_hr_data 조회"] = ok3
+    if not ok3:
+        # 이후 모델 예측 불가이지만 온습도/심박은 계속 테스트
+        worker_hr_data = None
+
+    # TEST 4
+    ok4, env = test_environment_data(repository, worker_id)
+    results["온습도 조회"] = ok4
+
+    # TEST 5
+    ok5, watch = test_watch_hr_data(repository, worker_id)
+    results["심박 조회"] = ok5
+
+    # TEST 6 — worker_hr_data / env / watch 모두 있어야 가능
+    if worker_hr_data and env and watch:
+        profile = repository.fetch_worker_profile(worker_id)
+        ok6, prediction = test_model_prediction(
+            worker_id=worker_id,
+            worker_hr_data=worker_hr_data,
+            env=env,
+            watch=watch,
+            work_duration_min=profile.work_duration_min,
+        )
+        results["회귀모델 예측"] = ok6
+
+        # TEST 7
+        if ok6 and prediction:
+            ok7, _ = test_mqtt_publish(prediction, profile.target_topic)
+            results["MQTT 발행"] = ok7
+        else:
+            results["MQTT 발행"] = False
+    else:
+        _info("TEST 6/7 스킵 — 이전 단계 데이터 부족")
+        results["회귀모델 예측"] = False
+        results["MQTT 발행"] = False
+
+    _print_summary(results)
+
+
+def _print_summary(results: dict[str, bool]) -> None:
+    _section("테스트 결과 요약")
+    passed = sum(1 for v in results.values() if v)
+    total = len(results)
+    for name, ok in results.items():
+        mark = f"{_GREEN}PASS{_RESET}" if ok else f"{_RED}FAIL{_RESET}"
+        print(f"  [{mark}] {name}")
+    print()
+    color = _GREEN if passed == total else _RED
+    print(f"  {color}{_BOLD}{passed}/{total} 통과{_RESET}")
+
+
+# ─── 타입 변환 헬퍼 ───────────────────────────────────────────────────────────
 
 def _required_int(row: dict[str, Any], key: str) -> int:
     value = row.get(key)
@@ -330,42 +483,20 @@ def _coerce_gender(value: Any) -> int:
     return int(value)
 
 
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="DB에서 센서 ID로 연결된 작업자를 찾고 worker_hr_data 기반 회귀모델 예측까지 실행합니다."
+        description="워치 파이프라인 통합 테스트 (온습도·작업자정보·심박 → 모델 예측 → MQTT)"
     )
     parser.add_argument(
         "sensor_id",
         nargs="?",
         default=DEFAULT_SENSOR_ID,
-        help=f"조회할 센서 ID. 기본값: {DEFAULT_SENSOR_ID}",
+        help=f"테스트할 센서 ID. 기본값: {DEFAULT_SENSOR_ID}",
     )
     args = parser.parse_args()
-
-    try:
-        result = run_worker_hr_data_pipeline(args.sensor_id)
-    except Exception as e:
-        print(f"[test_main] 조회 실패: {type(e).__name__}: {e}")
-        return
-
-    if result is None:
-        print(f"[test_main] 결과 없음: sensor_id={args.sensor_id}")
-        return
-
-    if result["worker_hr_data"] is None:
-        print(
-            "[test_main] 결과: "
-            f"sensor_id={args.sensor_id}, worker_id={result['worker_id']}, "
-            "worker_hr_data 없음"
-        )
-        return
-
-    print(
-        "[test_main] 결과: "
-        f"sensor_id={args.sensor_id}, worker_id={result['worker_id']}, "
-        f"worker_hr_data_id={result['worker_hr_data'].get('worker_hr_data_id')}, "
-        f"prediction={result['prediction']}"
-    )
+    run_all_tests(args.sensor_id)
 
 
 if __name__ == "__main__":

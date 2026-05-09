@@ -173,7 +173,23 @@ async def lifespan(app: FastAPI):
 
     logger.info("MQTT 센서 서비스 시작 완료")
 
-    # 7. mDNS 자기 방송
+    # 7. 워치 파이프라인 스케줄러 — 등록된 heart_band 센서마다 스레드 1개씩 시작
+    #
+    # 각 스레드는 interval_sec 마다:
+    #   sensor_id → worker_id → 온습도/심박/작업자정보 조회 → 회귀모델 예측 → MQTT 발행
+    from core.watch_pipeline.runner import WatchPipelineScheduler
+
+    watch_scheduler = WatchPipelineScheduler(
+        db_handler=db,
+        mqtt_publish_fn=mqtt_sensor_svc.publish,
+        interval_sec=30,
+    )
+    watch_scheduler.start()
+    app.state.watch_scheduler = watch_scheduler
+
+    logger.info("워치 파이프라인 스케줄러 시작 완료")
+
+    # 8. mDNS 자기 방송
     #
     # 앱이 Jetson API 서버를 탐색할 수 있도록 Jetson 자체도 mDNS로 방송한다.
     aiozc, mdns_info = await _start_mdns_broadcast(current_ip)
@@ -187,6 +203,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── 종료 처리 ────────────────────────────────────────────────────────────
+
+    try:
+        watch_scheduler.stop()
+    except Exception as e:
+        logger.warning("워치 파이프라인 스케줄러 종료 중 오류: %s", e)
 
     try:
         await mdns_service.stop()

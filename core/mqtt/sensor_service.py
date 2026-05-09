@@ -271,6 +271,11 @@ class MqttSensorService:
         )
         print("[MQTT Sensor] END publish_set_interval")
 
+    def publish(self, topic: str, payload: str):
+        """범용 MQTT 발행 — WatchPipelineScheduler 등 외부에서 사용."""
+        print(f"[MQTT Sensor] publish topic={topic} payload={payload}")
+        self.client.publish(topic, payload)
+
     def publish_alert(
         self,
         sensor_id: str,
