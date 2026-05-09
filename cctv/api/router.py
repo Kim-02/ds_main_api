@@ -1,70 +1,187 @@
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.session import get_db
 
 from . import service
-from .schemas import CameraCreate, CameraOut, CameraUpdate
-
-from pydantic import BaseModel
+from .schemas import (
+    AppCameraRegisterReq,
+    CameraCreate,
+    CameraOut,
+    CameraUpdate,
+    FirePipelineActionResponse,
+    FirePipelineStatus,
+)
 
 DB = Annotated[AsyncSession, Depends(get_db)]
+
 router = APIRouter(prefix="/cctv/cameras", tags=["cctv"])
 
-# 기존 API 호환
-legacy_router = APIRouter(prefix="/api/cameras", tags=["cctv"])
 
+# ── CCTV CRUD ────────────────────────────────────────────────────────────────
 
-class AppCameraReq(BaseModel):
-    ip_address: str
-    camera_id: str
-    camera_pw: str
+@router.get(
+    "/",
+    response_model=list[CameraOut],
+    summary="CCTV 목록 조회",
+)
+async def list_cameras(
+    db: DB,
+    process_id: Optional[int] = Query(None),
+):
+    """
+    등록된 CCTV 목록을 조회합니다.
 
-
-@legacy_router.post("/register", summary="카메라 등록 (기존 앱 호환)")
-def register_camera_legacy(req: AppCameraReq, request: Request):
-    from fastapi import HTTPException, Request as Req
-    db = request.app.state.db
-    result = db.register_camera_info(req.ip_address, req.camera_id, req.camera_pw)
-    if result is None:
-        raise HTTPException(status_code=400, detail="이미 등록된 카메라입니다.")
-    elif result is False:
-        raise HTTPException(status_code=404, detail="Jetson 정보가 DB에 없습니다.")
-    return {"status": "success", "message": "카메라가 성공적으로 등록되었습니다."}
-
-
-@legacy_router.get("", summary="CCTV 목록 조회 (기존 앱 호환)")
-def get_cameras_legacy(request: Request):
-    cctv_list = request.app.state.db.get_cctv_list()
-    result = [
-        {"ip_address": c["ip_address"], "sen_name": c["sen_name"], "sen_locate": c["sen_locate"], "health": 1}
-        for c in cctv_list
-    ]
-    return {"status": "success", "data": result}
-
-
-@router.get("/", response_model=list[CameraOut])
-async def list_cameras(db: DB, process_id: Optional[int] = Query(None)):
+    process_id를 지정하면 해당 process에 속한 CCTV만 조회합니다.
+    """
     return await service.list_cameras(db, process_id=process_id)
 
 
-@router.post("/", response_model=CameraOut, status_code=status.HTTP_201_CREATED)
-async def create_camera(data: CameraCreate, db: DB):
+@router.post(
+    "/",
+    response_model=CameraOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="CCTV 직접 생성",
+)
+async def create_camera(
+    data: CameraCreate,
+    db: DB,
+):
+    """
+    RTSP URL을 이미 알고 있을 때 직접 CCTV를 생성합니다.
+
+    일반 앱 등록에서는 /cctv/cameras/register를 사용합니다.
+    """
     return await service.create_camera(db, data)
 
 
-@router.get("/{sensor_id}", response_model=CameraOut)
-async def get_camera(sensor_id: int, db: DB):
+@router.post(
+    "/register",
+    response_model=CameraOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="CCTV 앱 등록",
+)
+async def register_camera_from_app(
+    data: AppCameraRegisterReq,
+    db: DB,
+):
+    """
+    앱에서 CCTV IP와 비밀번호를 입력해 카메라를 등록합니다.
+
+    처리 흐름:
+    1. ip_address + camera_username + camera_password로 RTSP URL 생성
+    2. Sensor 생성
+    3. Camera 상세 정보 생성
+    4. RTSP reader/buffer 시작
+    5. fire_pipeline_enabled=True이면 fire pipeline 자동 시작
+    """
+    return await service.register_camera_from_app(db, data)
+
+
+@router.get(
+    "/{sensor_id}",
+    response_model=CameraOut,
+    summary="CCTV 상세 조회",
+)
+async def get_camera(
+    sensor_id: int,
+    db: DB,
+):
+    """
+    Sensor ID 기준으로 CCTV 상세 정보를 조회합니다.
+    """
     return await service.get_camera(db, sensor_id)
 
 
-@router.put("/{sensor_id}", response_model=CameraOut)
-async def update_camera(sensor_id: int, data: CameraUpdate, db: DB):
+@router.put(
+    "/{sensor_id}",
+    response_model=CameraOut,
+    summary="CCTV 수정",
+)
+async def update_camera(
+    sensor_id: int,
+    data: CameraUpdate,
+    db: DB,
+):
+    """
+    Sensor ID 기준으로 CCTV 정보를 수정합니다.
+
+    수정 가능:
+    - name
+    - is_active
+    - rtsp_url
+    """
     return await service.update_camera(db, sensor_id, data)
 
 
-@router.delete("/{sensor_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_camera(sensor_id: int, db: DB):
+@router.delete(
+    "/{sensor_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="CCTV 삭제",
+)
+async def delete_camera(
+    sensor_id: int,
+    db: DB,
+):
+    """
+    Sensor ID 기준으로 CCTV를 삭제합니다.
+
+    삭제 시:
+    - fire pipeline 중단
+    - RTSP buffer 중단
+    - RTSP reader 중단
+    - DB 삭제
+    """
     await service.delete_camera(db, sensor_id)
+
+
+# ── Fire Pipeline 상태 및 제어 ────────────────────────────────────────────────
+
+@router.get(
+    "/{sensor_id}/fire-pipeline",
+    response_model=FirePipelineStatus,
+    summary="Fire pipeline 상태 조회",
+)
+async def get_fire_pipeline_status(
+    sensor_id: int,
+    db: DB,
+):
+    """
+    Sensor ID 기준으로 연결된 Camera ID를 찾고,
+    해당 Camera ID로 fire pipeline 상태를 조회합니다.
+    """
+    return await service.get_fire_pipeline_status(db, sensor_id)
+
+
+@router.post(
+    "/{sensor_id}/fire-pipeline/start",
+    response_model=FirePipelineActionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Fire pipeline 수동 시작",
+)
+async def start_fire_pipeline(
+    sensor_id: int,
+    db: DB,
+):
+    """
+    Sensor ID 기준으로 fire pipeline을 수동 시작합니다.
+    """
+    return await service.start_fire_pipeline(db, sensor_id)
+
+
+@router.post(
+    "/{sensor_id}/fire-pipeline/stop",
+    response_model=FirePipelineActionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Fire pipeline 수동 중단",
+)
+async def stop_fire_pipeline(
+    sensor_id: int,
+    db: DB,
+):
+    """
+    Sensor ID 기준으로 fire pipeline을 수동 중단합니다.
+    """
+    return await service.stop_fire_pipeline(db, sensor_id)

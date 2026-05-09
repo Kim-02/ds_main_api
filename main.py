@@ -41,7 +41,7 @@ active_vital_ws: List[WebSocket] = []
 active_th_ws: List[WebSocket] = []
 
 
-# ── Transmission 어댑터 (SafetyDetectionModule → WebSocket) ─────────────────
+# ── Transmission 어댑터 ──────────────────────────────────────────────────────
 
 class RealTransmission:
     def __init__(self, loop):
@@ -93,7 +93,6 @@ async def lifespan(app: FastAPI):
         port=settings.mariadb_port,
     )
 
-    # 전체 API에서 사용할 실제 MariaDB 핸들러
     app.state.db = db
 
     # 2. IP 감지 + Jetson DB 업데이트
@@ -126,13 +125,6 @@ async def lifespan(app: FastAPI):
         logger.warning("SafetyDetectionModule 없음 (스킵): %s", e)
 
     # 4. mDNS 센서 탐색 시작
-    #
-    # 중요:
-    # - worker assign-heart-band API에서 request.app.state.mdns_sensor_service를 사용한다.
-    # - 기존 코드 호환을 위해 app.state.mdns_service도 같이 유지한다.
-    #
-    # MdnsSensorService가 db_handler 인자를 받는 버전과
-    # 인자를 받지 않는 버전 모두 대응한다.
     from core.mdns.service import MdnsSensorService
 
     try:
@@ -142,24 +134,17 @@ async def lifespan(app: FastAPI):
 
     await mdns_service.start()
 
-    # 기존 코드 호환용
     app.state.mdns_service = mdns_service
-
-    # worker API에서 사용할 이름
     app.state.mdns_sensor_service = mdns_service
 
     logger.info("mDNS 센서 탐색 서비스 시작 완료")
 
-    # 5. DB에서 temperature MQTT 핸들러에 db 주입
+    # 5. temperature MQTT 핸들러에 db 주입
     from temperature.mqtt.handler import set_db as set_temp_db
 
     set_temp_db(db)
 
     # 6. paho MQTT 센서 서비스 시작
-    #
-    # 중요:
-    # - worker assign-heart-band API에서 request.app.state.mqtt_sensor_service를 사용한다.
-    # - register/unregister 명령을 워치의 sensors/{sensor_id}/cmd 로 발행한다.
     from core.mqtt.sensor_service import MqttSensorService
 
     mqtt_sensor_svc = MqttSensorService(
@@ -173,9 +158,16 @@ async def lifespan(app: FastAPI):
 
     logger.info("MQTT 센서 서비스 시작 완료")
 
-    # 7. mDNS 자기 방송
-    #
-    # 앱이 Jetson API 서버를 탐색할 수 있도록 Jetson 자체도 mDNS로 방송한다.
+    # 7. Fire pipeline manager 초기화 (선택적 — cctv/fire_pipeline/ 미배포 시 건너뜀)
+    fire_manager = None
+    try:
+        from cctv.fire_pipeline import manager as fire_manager
+        fire_manager.init_manager(main_loop, ws_manager.broadcast)
+        logger.info("Fire pipeline manager 초기화 완료")
+    except ImportError as e:
+        logger.warning("Fire pipeline 미사용 (cctv.fire_pipeline 모듈 없음): %s", e)
+
+    # 8. Jetson mDNS 자기 방송
     aiozc, mdns_info = await _start_mdns_broadcast(current_ip)
 
     logger.info(
@@ -187,6 +179,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── 종료 처리 ────────────────────────────────────────────────────────────
+
+    if fire_manager is not None:
+        try:
+            fire_manager.stop_all()
+        except Exception as e:
+            logger.warning("Fire pipeline 종료 중 오류: %s", e)
 
     try:
         await mdns_service.stop()
@@ -278,12 +276,15 @@ api = APIRouter(prefix="/api/v1")
 from process.router import router as process_router
 from worker.router import router as worker_router
 from temperature.api.router import router as temperature_router, web_router as temp_web_router
+from cctv.api.router import router as cctv_router
 
 api.include_router(process_router)
 api.include_router(worker_router)
 api.include_router(temperature_router)
+api.include_router(cctv_router)
 
 app.include_router(api)
+
 
 # 기존 API 호환 (/api/...)
 from worker.router import legacy_router as worker_legacy_router
