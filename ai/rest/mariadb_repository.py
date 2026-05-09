@@ -110,6 +110,18 @@ class DatabaseHandlerRestDataRepository:
             target_topic=_resolve_target_topic(row),
         )
 
+    def fetch_sensor_last_seen(self, sensor_id: str) -> Optional[datetime]:
+        row = self._fetch_optional(
+            "SELECT last_seen_at FROM sensor WHERE sensor_id = %s LIMIT 1",
+            (sensor_id,),
+        )
+        if not row or row.get("last_seen_at") is None:
+            return None
+        value = row["last_seen_at"]
+        if isinstance(value, datetime):
+            return value
+        return _to_datetime(value)
+
     def find_worker_id_by_sensor_id(self, sensor_id: str) -> Optional[str]:
         row = self._fetch_optional(
             """

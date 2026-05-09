@@ -1,11 +1,13 @@
 """등록된 heart_band 센서마다 스레드를 열어 주기적으로 휴식 권고 파이프라인을 실행한다."""
 import logging
 import threading
+from datetime import datetime
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SEC = 30
+STALE_THRESHOLD_SEC = 15
 
 
 class WatchPipelineRunner:
@@ -53,6 +55,15 @@ class WatchPipelineRunner:
             self._stop_event.wait(self.interval_sec)
 
     def _run_once(self):
+        # 최근 15초 이내 갱신이 없으면 워치가 오프라인으로 간주하고 스킵
+        last_seen = self._repository.fetch_sensor_last_seen(self.sensor_id)
+        if last_seen is None:
+            return
+        elapsed = (datetime.now() - last_seen).total_seconds()
+        if elapsed > STALE_THRESHOLD_SEC:
+            logger.info("[WatchPipeline] 워치 응답 없음 — 스킵 sensor_id=%s", self.sensor_id)
+            return
+
         worker_id = self._repository.find_worker_id_by_sensor_id(self.sensor_id)
         if not worker_id:
             return
