@@ -64,12 +64,14 @@ class WatchPipelineRunner:
             self._stop_event.wait(self.interval_sec)
 
     def _run_once(self):
-        # 최근 15초 이내 갱신이 없으면 워치 오프라인으로 간주하고 스킵
-        last_seen = self._repository.fetch_sensor_last_seen(self.sensor_id)
-        if last_seen is None:
+        # 최근 15초 이내 심박 데이터가 없으면 워치 미착용으로 간주하고 스킵.
+        # sensor.last_seen_at 은 status ping 만으로도 갱신되므로
+        # hb_trans 의 실제 심박 수신 시각을 기준으로 한다.
+        last_hr = self._repository.fetch_last_hr_time(self.sensor_id)
+        if last_hr is None:
             return
-        if (datetime.now() - last_seen).total_seconds() > STALE_THRESHOLD_SEC:
-            logger.info("[WatchPipeline] 워치 응답 없음 — 스킵 sensor_id=%s", self.sensor_id)
+        if (datetime.now() - last_hr).total_seconds() > STALE_THRESHOLD_SEC:
+            logger.info("[WatchPipeline] 심박 미수신 (미착용 추정) — 스킵 sensor_id=%s", self.sensor_id)
             return
 
         worker_id = self._repository.find_worker_id_by_sensor_id(self.sensor_id)

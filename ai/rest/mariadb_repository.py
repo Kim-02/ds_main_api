@@ -110,14 +110,27 @@ class DatabaseHandlerRestDataRepository:
             target_topic=_resolve_target_topic(row),
         )
 
-    def fetch_sensor_last_seen(self, sensor_id: str) -> Optional[datetime]:
+    def fetch_last_hr_time(self, sensor_id: str) -> Optional[datetime]:
+        """hb_trans 에서 이 센서의 가장 최근 심박 수신 시각을 반환한다.
+
+        sensor.last_seen_at 은 status ping 만으로도 갱신되므로
+        실제로 워치를 착용 중인지 판단하기에 부적합하다.
+        hb_trans 의 실제 심박 데이터 시각을 기준으로 삼는다.
+        """
         row = self._fetch_optional(
-            "SELECT last_seen_at FROM sensor WHERE sensor_id = %s LIMIT 1",
+            """
+            SELECT h.time AS last_hr_time
+            FROM hb_trans h
+            JOIN sensor s ON h.sen_id = s.sen_id
+            WHERE s.sensor_id = %s
+            ORDER BY h.time DESC
+            LIMIT 1
+            """,
             (sensor_id,),
         )
-        if not row or row.get("last_seen_at") is None:
+        if not row or row.get("last_hr_time") is None:
             return None
-        value = row["last_seen_at"]
+        value = row["last_hr_time"]
         if isinstance(value, datetime):
             return value
         return _to_datetime(value)
