@@ -451,6 +451,7 @@ api = APIRouter(prefix="/api/v1")
 
 from process.router import router as process_router
 from worker.router import router as worker_router
+from cctv.api.scenario import router as scenario_router
 from temperature.api.router import router as temperature_router, web_router as temp_web_router
 from cctv.api.router import router as cctv_router
 
@@ -458,6 +459,7 @@ api.include_router(process_router)
 api.include_router(worker_router)
 api.include_router(temperature_router)
 api.include_router(cctv_router)
+api.include_router(scenario_router)
 
 app.include_router(api)
 
