@@ -47,7 +47,7 @@ ifaddr==0.2.0
 
 # REST recommendation model
 joblib==1.5.3
-numpy==1.26.4
+numpy==2.2.6
 pandas==2.2.3
 python-dateutil==2.9.0.post0
 pytz==2024.2
