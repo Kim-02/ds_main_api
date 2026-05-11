@@ -135,9 +135,10 @@ class StartupChecker:
     async def _check_vllm(self) -> tuple[bool, str]:
         from config import settings
         base_url = settings.vllm_base_url.rstrip("/")
+        headers = {"Authorization": f"Bearer {settings.vllm_api_key}"} if settings.vllm_api_key else {}
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{base_url}/models")
+                resp = await client.get(f"{base_url}/models", headers=headers)
             ok = resp.status_code == 200
             return ok, f"status={resp.status_code} url={base_url}"
         except Exception as exc:
