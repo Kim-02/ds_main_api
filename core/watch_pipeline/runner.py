@@ -28,13 +28,17 @@ class WatchPipelineRunner:
         repository,
         rest_service,
         mqtt_publish_fn: Callable[[str, str], None],
+        camera_vlm_manager=None,
         interval_sec: int = DEFAULT_INTERVAL_SEC,
+        stale_threshold_sec: int = STALE_THRESHOLD_SEC,
     ):
         self.sensor_id = sensor_id
         self._repository = repository
         self._rest_service = rest_service
         self._mqtt_publish_fn = mqtt_publish_fn
+        self._camera_vlm_manager = camera_vlm_manager
         self.interval_sec = interval_sec
+        self.stale_threshold_sec = stale_threshold_sec
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -64,13 +68,13 @@ class WatchPipelineRunner:
             self._stop_event.wait(self.interval_sec)
 
     def _run_once(self):
-        # 최근 15초 이내 심박 데이터가 없으면 워치 미착용으로 간주하고 스킵.
+        # 설정된 시간 이내 심박 데이터가 없으면 워치 미착용으로 간주하고 스킵.
         # sensor.last_seen_at 은 status ping 만으로도 갱신되므로
         # hb_trans 의 실제 심박 수신 시각을 기준으로 한다.
         last_hr = self._repository.fetch_last_hr_time(self.sensor_id)
         if last_hr is None:
             return
-        if (datetime.now() - last_hr).total_seconds() > STALE_THRESHOLD_SEC:
+        if (datetime.now() - last_hr).total_seconds() > self.stale_threshold_sec:
             logger.info("[WatchPipeline] 심박 미수신 (미착용 추정) — 스킵 sensor_id=%s", self.sensor_id)
             return
 
@@ -87,6 +91,7 @@ class WatchPipelineRunner:
         # 1) 제어 신호 ON  (약한→yellow 5초 진동 / 강한·반드시→red 5초 진동)
         self._mqtt_publish_fn(topic, on_payload)
         logger.info("[WatchPipeline] 휴식 권고 발행 sensor_id=%s", self.sensor_id)
+        self._trigger_same_space_camera_vlm(worker_id, result.prediction)
 
         # 2) duration 동안 대기 (stop 요청 시 즉시 탈출)
         duration_sec = result.command.duration_ms / 1000
@@ -97,6 +102,19 @@ class WatchPipelineRunner:
             self._mqtt_publish_fn(topic, _ALERT_OFF_PAYLOAD)
             logger.info("[WatchPipeline] 진동 해제 발행 sensor_id=%s", self.sensor_id)
 
+    def _trigger_same_space_camera_vlm(self, worker_id: str, prediction: dict) -> None:
+        if self._camera_vlm_manager is None:
+            return
+        try:
+            result = self._camera_vlm_manager.trigger_for_watch_sensor(
+                self.sensor_id,
+                worker_id=worker_id,
+                prediction=prediction,
+            )
+            logger.info("[WatchPipeline] same-space camera VLM trigger result=%s", result)
+        except Exception as exc:
+            logger.error("[WatchPipeline] same-space camera VLM trigger failed: %s", exc)
+
 
 class WatchPipelineScheduler:
     """DB에 등록된 heart_band 센서마다 WatchPipelineRunner 스레드를 관리한다."""
@@ -105,11 +123,23 @@ class WatchPipelineScheduler:
         self,
         db_handler,
         mqtt_publish_fn: Callable[[str, str], None],
+        camera_vlm_manager=None,
         interval_sec: int = DEFAULT_INTERVAL_SEC,
+        stale_threshold_sec: int = STALE_THRESHOLD_SEC,
+        alert_duration_ms: int = 5000,
+        alert_reset_after_ms: int = 5000,
+        forced_rest_work_min: int = 120,
+        rest_repository_defaults: dict | None = None,
     ):
         self._db_handler = db_handler
         self._mqtt_publish_fn = mqtt_publish_fn
+        self._camera_vlm_manager = camera_vlm_manager
         self.interval_sec = interval_sec
+        self.stale_threshold_sec = stale_threshold_sec
+        self.alert_duration_ms = alert_duration_ms
+        self.alert_reset_after_ms = alert_reset_after_ms
+        self.forced_rest_work_min = forced_rest_work_min
+        self.rest_repository_defaults = rest_repository_defaults or {}
         self._runners: dict[str, WatchPipelineRunner] = {}
         self._repository = None
         self._rest_service = None
@@ -149,10 +179,21 @@ class WatchPipelineScheduler:
             runner.stop()
 
     def _init_service(self):
-        from ai.rest import DatabaseHandlerRestDataRepository, RestRuntimeService
+        from ai.rest import BandControlCommandBuilder, DatabaseHandlerRestDataRepository, RestRuntimeService
 
-        self._repository = DatabaseHandlerRestDataRepository(self._db_handler)
-        self._rest_service = RestRuntimeService.from_model_path(repository=self._repository)
+        self._repository = DatabaseHandlerRestDataRepository(
+            self._db_handler,
+            **self.rest_repository_defaults,
+        )
+        command_builder = BandControlCommandBuilder(
+            duration_ms=self.alert_duration_ms,
+            reset_after_ms=self.alert_reset_after_ms,
+        )
+        self._rest_service = RestRuntimeService.from_model_path(
+            repository=self._repository,
+            forced_rest_work_min=self.forced_rest_work_min,
+            command_builder=command_builder,
+        )
         logger.info("[WatchScheduler] 서비스 초기화 완료")
 
     def _start_runner(self, sensor_id: str):
@@ -163,7 +204,9 @@ class WatchPipelineScheduler:
             repository=self._repository,
             rest_service=self._rest_service,
             mqtt_publish_fn=self._mqtt_publish_fn,
+            camera_vlm_manager=self._camera_vlm_manager,
             interval_sec=self.interval_sec,
+            stale_threshold_sec=self.stale_threshold_sec,
         )
         runner.start()
         self._runners[sensor_id] = runner

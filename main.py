@@ -188,27 +188,69 @@ async def lifespan(app: FastAPI):
     logger.info("MQTT 센서 서비스 시작 완료")
 
     # 7. 워치 파이프라인 스케줄러 — 등록된 heart_band 센서마다 스레드 1개씩 시작
+    from core.watch_pipeline.camera_vlm import WatchCameraVlmManager
     from core.watch_pipeline.runner import WatchPipelineScheduler
+
+    watch_camera_vlm_manager = WatchCameraVlmManager(
+        db_handler=db,
+        loop=main_loop,
+        broadcast_fn=ws_manager.broadcast,
+        session_seconds=settings.watch_camera_vlm_session_seconds,
+        analysis_interval_seconds=settings.watch_camera_vlm_analysis_interval_seconds,
+    )
+    app.state.watch_camera_vlm_manager = watch_camera_vlm_manager
 
     watch_scheduler = WatchPipelineScheduler(
         db_handler=db,
         mqtt_publish_fn=mqtt_sensor_svc.publish,
-        interval_sec=30,
+        camera_vlm_manager=watch_camera_vlm_manager,
+        interval_sec=settings.watch_pipeline_interval_seconds,
+        stale_threshold_sec=settings.watch_hr_stale_seconds,
+        alert_duration_ms=settings.watch_alert_duration_ms,
+        alert_reset_after_ms=settings.watch_alert_reset_after_ms,
+        forced_rest_work_min=settings.rest_forced_rest_work_minutes,
+        rest_repository_defaults={
+            "default_age": settings.rest_default_age,
+            "default_gender": settings.rest_default_gender,
+            "default_height_cm": settings.rest_default_height_cm,
+            "default_weight_kg": settings.rest_default_weight_kg,
+            "default_work_duration_min": settings.rest_default_work_duration_min,
+        },
     )
     watch_scheduler.start()
     app.state.watch_scheduler = watch_scheduler
 
     logger.info("워치 파이프라인 스케줄러 시작 완료")
 
-    # 8. CCTV VLM 파이프라인 — CCTV_RTSP_URL 설정 시 자동 시작
+    # 8. 온도 파이프라인 스케줄러 — 등록된 온습도 센서마다 스레드 1개씩 시작
+    from core.temperature_pipeline.runner import build_temperature_pipeline_from_settings
+
+    temperature_camera_vlm_manager, temperature_scheduler = build_temperature_pipeline_from_settings(
+        db_handler=db,
+        loop=main_loop,
+        broadcast_fn=ws_manager.broadcast,
+    )
+    app.state.temperature_camera_vlm_manager = temperature_camera_vlm_manager
+    temperature_scheduler.start()
+    app.state.temperature_scheduler = temperature_scheduler
+
+    logger.info("온도 파이프라인 스케줄러 시작 완료")
+
+    # 9. CCTV VLM 파이프라인 — CCTV_RTSP_URL 설정 시 자동 시작
     app.state.vlm_runner = None
     if settings.cctv_rtsp_url:
         from ai.vlm.cctv_runner import CctvVlmRunner
 
         def _on_vlm_result(text: str):
             import asyncio
+            from core.notifications import make_vlm_push_payload
+
             asyncio.run_coroutine_threadsafe(
-                ws_manager.broadcast({"type": "vlm_analysis", "text": text}),
+                ws_manager.broadcast(make_vlm_push_payload(
+                    "vlm_analysis",
+                    "CCTV VLM 분석 완료",
+                    text,
+                )),
                 main_loop,
             )
 
@@ -222,7 +264,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("CCTV VLM 파이프라인 비활성화 (CCTV_RTSP_URL 미설정)")
 
-    # 9. Fire pipeline manager (CCTV 화재 감지 — cctv/fire_pipeline/ 모듈 기반)
+    # 10. Fire pipeline manager (CCTV 화재 감지 — cctv/fire_pipeline/ 모듈 기반)
     fire_manager = None
     try:
         from cctv.fire_pipeline import manager as fire_manager_mod
@@ -232,7 +274,19 @@ async def lifespan(app: FastAPI):
     except ImportError as e:
         logger.warning("Fire pipeline 미사용 (모듈 없음): %s", e)
 
-    # 10. mDNS 자기 방송
+    # 11. DB에 이미 등록된 CCTV runtime 복구
+    app.state.cctv_runtime_startup = None
+    try:
+        from cctv.api.service import start_registered_camera_runtime_components
+        from database.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            app.state.cctv_runtime_startup = await start_registered_camera_runtime_components(session)
+        logger.info("등록 CCTV runtime 복구 완료: %s", app.state.cctv_runtime_startup)
+    except Exception as e:
+        logger.warning("등록 CCTV runtime 복구 스킵: %s", e)
+
+    # 12. mDNS 자기 방송
     aiozc, mdns_info = await _start_mdns_broadcast(current_ip)
 
     logger.info(
@@ -252,6 +306,18 @@ async def lifespan(app: FastAPI):
             logger.warning("Fire pipeline 종료 중 오류: %s", e)
 
     try:
+        from cctv.buffer import stop_all_buffers
+        stop_all_buffers()
+    except Exception as e:
+        logger.warning("CCTV frame buffer 종료 중 오류: %s", e)
+
+    try:
+        from cctv.rtsp import stop_all_readers
+        stop_all_readers()
+    except Exception as e:
+        logger.warning("CCTV RTSP reader 종료 중 오류: %s", e)
+
+    try:
         if app.state.vlm_runner is not None:
             app.state.vlm_runner.stop()
     except Exception as e:
@@ -261,6 +327,21 @@ async def lifespan(app: FastAPI):
         watch_scheduler.stop()
     except Exception as e:
         logger.warning("워치 파이프라인 스케줄러 종료 중 오류: %s", e)
+
+    try:
+        watch_camera_vlm_manager.stop_all()
+    except Exception as e:
+        logger.warning("워치 연동 카메라 VLM 종료 중 오류: %s", e)
+
+    try:
+        temperature_scheduler.stop()
+    except Exception as e:
+        logger.warning("온도 파이프라인 스케줄러 종료 중 오류: %s", e)
+
+    try:
+        temperature_camera_vlm_manager.stop_all()
+    except Exception as e:
+        logger.warning("온도 연동 카메라 VLM 종료 중 오류: %s", e)
 
     try:
         await mdns_service.stop()
@@ -373,11 +454,15 @@ from worker.router import legacy_router as worker_legacy_router
 from core.jetson.router import router as jetson_router
 from core.sensor_registry.router import router as sensor_registry_router
 from core.map.router import router as map_router
+from core.watch_pipeline.router import router as watch_vlm_router
+from core.temperature_pipeline.router import router as temperature_vlm_router
 from core.report.router import internal_router
 
 app.include_router(jetson_router)
 app.include_router(sensor_registry_router)
 app.include_router(map_router)
+app.include_router(watch_vlm_router)
+app.include_router(temperature_vlm_router)
 app.include_router(worker_legacy_router)
 app.include_router(temp_web_router)
 app.include_router(internal_router)
@@ -451,11 +536,14 @@ def root():
 
 @app.get("/health", tags=["health"])
 def health(request: Request):
+    from ai.vlm.timeshare import get_vlm_timeshare_scheduler
+
     vllm_manager = getattr(request.app.state, "vllm_server_manager", None)
     yolo_engine_ready = getattr(request.app.state, "yolo_engine_ready", False)
     vllm_status = None
     vllm_ready = False
     vllm_detail = "manager_not_started"
+    temperature_scheduler = getattr(request.app.state, "temperature_scheduler", None)
 
     if vllm_manager is not None:
         vllm_status = vllm_manager.status()
@@ -467,6 +555,12 @@ def health(request: Request):
         "vllm_ready": vllm_ready,
         "vllm_detail": vllm_detail,
         "vllm": vllm_status,
+        "vlm_timeshare": get_vlm_timeshare_scheduler().status(),
+        "temperature_pipeline": (
+            temperature_scheduler.get_status()
+            if temperature_scheduler is not None
+            else None
+        ),
     }
 
 

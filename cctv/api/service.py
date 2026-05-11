@@ -53,6 +53,74 @@ async def list_cameras(
     return [s for s in sensors if s.sensor_type == SensorType.camera]
 
 
+async def start_registered_camera_runtime_components(
+    db: AsyncSession,
+    process_id: int | None = None,
+) -> dict:
+    """서버 시작 시 DB에 이미 등록된 CCTV runtime 스레드를 복구한다."""
+    sensors = await list_cameras(db, process_id=process_id)
+    started = 0
+    skipped = 0
+    failed = 0
+    cameras = []
+
+    for sensor in sensors:
+        if not getattr(sensor, "is_active", True):
+            skipped += 1
+            cameras.append({
+                "sensor_id": sensor.id,
+                "camera_id": None,
+                "status": "skipped_inactive",
+            })
+            continue
+
+        cam = sensor.camera
+        if cam is None:
+            skipped += 1
+            cameras.append({
+                "sensor_id": sensor.id,
+                "camera_id": None,
+                "status": "skipped_no_camera_detail",
+            })
+            continue
+
+        try:
+            _start_runtime_components(
+                cam_id=cam.id,
+                rtsp_url=cam.rtsp_url,
+                process_id=sensor.process_id,
+            )
+            started += 1
+            cameras.append({
+                "sensor_id": sensor.id,
+                "camera_id": cam.id,
+                "status": "started",
+            })
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "등록 CCTV runtime 복구 실패 sensor_id=%s cam_id=%s: %s",
+                sensor.id,
+                cam.id,
+                exc,
+            )
+            cameras.append({
+                "sensor_id": sensor.id,
+                "camera_id": cam.id,
+                "status": "failed",
+                "error": str(exc),
+            })
+
+    result = {
+        "started": started,
+        "skipped": skipped,
+        "failed": failed,
+        "cameras": cameras,
+    }
+    logger.info("등록 CCTV runtime 복구 완료: %s", result)
+    return result
+
+
 async def get_camera(
     db: AsyncSession,
     sensor_id: int,
@@ -97,11 +165,16 @@ def _start_runtime_components(
         from cctv.rtsp import register_reader
         from cctv.buffer import start_buffer
 
-        register_reader(cam_id, rtsp_url)
+        register_reader(
+            cam_id,
+            rtsp_url,
+            reconnect_delay=settings.rtsp_reconnect_delay_seconds,
+        )
         start_buffer(
             cam_id,
             process_id,
             buffer_seconds=settings.frame_buffer_seconds,
+            sample_interval=settings.frame_buffer_sample_interval_seconds,
         )
     except Exception:
         logger.warning(

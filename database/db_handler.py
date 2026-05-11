@@ -225,6 +225,7 @@ class DatabaseHandler:
                 mqtt_topic,
                 mdns_hostname,
                 ip_addr,
+                space_id,
                 is_online,
                 last_seen_at,
                 registered_at,
@@ -241,6 +242,73 @@ class DatabaseHandler:
 
         except Exception as e:
             logging.error("get_registered_sensor_rows 오류: %s", e)
+            return []
+
+    def get_sensor_space_by_sensor_id(self, sensor_id: str) -> Optional[dict]:
+        """sensor_id 기준 센서의 space_id를 조회한다."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            s.sen_id,
+                            s.sensor_id,
+                            s.sensor_type,
+                            s.sen_name,
+                            s.space_id,
+                            sp.space_name
+                        FROM sensor s
+                        LEFT JOIN ds_space sp
+                          ON s.space_id = sp.space_id
+                        WHERE s.sensor_id = %s
+                        LIMIT 1
+                        """,
+                        (sensor_id,),
+                    )
+                    return cursor.fetchone()
+
+        except Exception as e:
+            logging.error("get_sensor_space_by_sensor_id 오류: %s", e)
+            return None
+
+    def get_cameras_by_space_id(self, space_id: int) -> list[dict]:
+        """space_id 기준 등록된 카메라 목록을 반환한다.
+
+        camera_info.space_id가 있으면 우선 사용하고, 없으면 sensor.space_id를 사용한다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            s.sen_id,
+                            s.sensor_id,
+                            s.sen_name,
+                            s.sen_locate,
+                            COALESCE(c.space_id, s.space_id) AS space_id,
+                            sp.space_name,
+                            s.is_online,
+                            c.ip_address,
+                            c.camera_id,
+                            c.camera_pw,
+                            c.health
+                        FROM camera_info c
+                        JOIN sensor s
+                          ON c.sen_id = s.sen_id
+                        LEFT JOIN ds_space sp
+                          ON COALESCE(c.space_id, s.space_id) = sp.space_id
+                        WHERE COALESCE(c.space_id, s.space_id) = %s
+                          AND s.sensor_type IN ('camera', 'cctv')
+                        ORDER BY s.sen_name
+                        """,
+                        (space_id,),
+                    )
+                    return cursor.fetchall()
+
+        except Exception as e:
+            logging.error("get_cameras_by_space_id 오류: %s", e)
             return []
 
     def register_discovered_sensors(self, jetson_id: int, sensors: list) -> bool:
@@ -1241,6 +1309,7 @@ class DatabaseHandler:
     # ------------------------------------------------------------------
 
     def get_floor_map_by_jetson_id(self, jetson_id: int):
+        """jetson_id 기준 가장 최근 평면도 1개 반환."""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -1253,9 +1322,12 @@ class DatabaseHandler:
                             image_base64,
                             image_mime_type,
                             image_width,
-                            image_height
+                            image_height,
+                            created_at,
+                            updated_at
                         FROM floor_map
                         WHERE jetson_id = %s
+                        ORDER BY updated_at DESC
                         LIMIT 1
                         """,
                         (jetson_id,),
@@ -1264,6 +1336,28 @@ class DatabaseHandler:
 
         except Exception as e:
             logging.error("get_floor_map_by_jetson_id 오류: %s", e)
+            return None
+
+    def get_floor_map_by_map_id(self, map_id: int):
+        """map_id 기준 평면도 1개 반환 (존재 여부 확인용)."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT map_id, jetson_id, map_name,
+                               image_mime_type, image_width, image_height,
+                               created_at, updated_at
+                        FROM floor_map
+                        WHERE map_id = %s
+                        LIMIT 1
+                        """,
+                        (map_id,),
+                    )
+                    return cursor.fetchone()
+
+        except Exception as e:
+            logging.error("get_floor_map_by_map_id 오류: %s", e)
             return None
 
     def get_sensor_positions_by_map_id(self, map_id: int) -> list[dict]:
@@ -1297,26 +1391,68 @@ class DatabaseHandler:
             logging.error("get_sensor_positions_by_map_id 오류: %s", e)
             return []
 
-    def get_registered_sensors_by_jetson_id(self, jetson_id: int) -> list[dict]:
+    def get_registered_sensors_by_jetson_id(
+        self,
+        jetson_id: int,
+        map_id: Optional[int] = None,
+    ) -> list[dict]:
+        """jetson_id에 등록된 온습도 센서 목록 반환.
+
+        map_id 를 전달하면 해당 맵에 이미 배치된 센서에 placed=1 을 함께 반환합니다.
+        온습도 센서 타입만 반환합니다 (temp_humidity, temperature_humidity, th, temperature).
+        """
+        TH_TYPES = ("temp_humidity", "temperature_humidity", "th", "temperature")
+        placeholders = ", ".join(["%s"] * len(TH_TYPES))
+
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT
-                            sensor_id,
-                            sensor_type,
-                            sen_name,
-                            sen_locate,
-                            model,
-                            mqtt_topic,
-                            is_online
-                        FROM sensor
-                        WHERE jetson_id = %s
-                        ORDER BY sen_name
-                        """,
-                        (jetson_id,),
-                    )
+                    if map_id is not None:
+                        # 특정 맵의 배치 여부(placed)를 함께 조회
+                        cursor.execute(
+                            f"""
+                            SELECT
+                                s.sensor_id,
+                                s.sensor_type,
+                                s.sen_name,
+                                s.sen_locate,
+                                s.model,
+                                s.mqtt_topic,
+                                s.is_online,
+                                CASE WHEN p.position_id IS NOT NULL THEN 1 ELSE 0 END AS placed,
+                                p.x_ratio,
+                                p.y_ratio
+                            FROM sensor s
+                            LEFT JOIN sensor_map_position p
+                              ON s.sensor_id = p.sensor_id
+                             AND p.map_id = %s
+                            WHERE s.jetson_id = %s
+                              AND s.sensor_type IN ({placeholders})
+                            ORDER BY s.sen_name
+                            """,
+                            (map_id, jetson_id, *TH_TYPES),
+                        )
+                    else:
+                        cursor.execute(
+                            f"""
+                            SELECT
+                                sensor_id,
+                                sensor_type,
+                                sen_name,
+                                sen_locate,
+                                model,
+                                mqtt_topic,
+                                is_online,
+                                0 AS placed,
+                                NULL AS x_ratio,
+                                NULL AS y_ratio
+                            FROM sensor
+                            WHERE jetson_id = %s
+                              AND sensor_type IN ({placeholders})
+                            ORDER BY sen_name
+                            """,
+                            (jetson_id, *TH_TYPES),
+                        )
                     return cursor.fetchall()
 
         except Exception as e:
@@ -1330,26 +1466,48 @@ class DatabaseHandler:
         x_ratio: float,
         y_ratio: float,
     ) -> bool:
+        """센서 위치 저장 / 갱신.
+
+        DB에 UNIQUE KEY(map_id, sensor_id)가 있으면 ON DUPLICATE KEY UPDATE 가 동작합니다.
+        없으면 SELECT 후 UPDATE/INSERT 방식으로 처리합니다.
+
+        권장 ALTER TABLE (아직 적용하지 않은 경우):
+            ALTER TABLE sensor_map_position
+            ADD UNIQUE KEY uq_map_sensor (map_id, sensor_id);
+        """
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
+                    # 먼저 존재 여부 확인 (UNIQUE KEY 유무에 관계없이 안전하게 처리)
                     cursor.execute(
                         """
-                        INSERT INTO sensor_map_position (
-                            map_id,
-                            sensor_id,
-                            x_ratio,
-                            y_ratio
-                        ) VALUES (
-                            %s, %s, %s, %s
-                        )
-                        ON DUPLICATE KEY UPDATE
-                            x_ratio = VALUES(x_ratio),
-                            y_ratio = VALUES(y_ratio),
-                            updated_at = NOW()
+                        SELECT position_id
+                        FROM sensor_map_position
+                        WHERE map_id = %s AND sensor_id = %s
+                        LIMIT 1
                         """,
-                        (map_id, sensor_id, x_ratio, y_ratio),
+                        (map_id, sensor_id),
                     )
+                    existing = cursor.fetchone()
+
+                    if existing:
+                        cursor.execute(
+                            """
+                            UPDATE sensor_map_position
+                            SET x_ratio = %s, y_ratio = %s, updated_at = NOW()
+                            WHERE map_id = %s AND sensor_id = %s
+                            """,
+                            (x_ratio, y_ratio, map_id, sensor_id),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO sensor_map_position
+                                (map_id, sensor_id, x_ratio, y_ratio)
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            (map_id, sensor_id, x_ratio, y_ratio),
+                        )
 
                 conn.commit()
             return True
@@ -1357,6 +1515,78 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("upsert_sensor_position 오류: %s", e)
             return False
+
+
+    def get_latest_th_by_sensor_id(self, sensor_id: str) -> Optional[dict]:
+        """
+        sensor.sensor_id 문자열 기준으로 온습도 최신값 1개 조회.
+
+        앱 API:
+            GET /api/maps/sensors/{sensor_id}/latest
+
+        센서가 존재하지만 측정값이 없으면
+        time, temp, humid는 None으로 반환합니다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 1. 센서 존재 확인
+                    cursor.execute(
+                        """
+                        SELECT
+                            sen_id,
+                            sensor_id,
+                            sen_name,
+                            sensor_type,
+                            sen_locate,
+                            is_online
+                        FROM sensor
+                        WHERE sensor_id = %s
+                        LIMIT 1
+                        """,
+                        (sensor_id,),
+                    )
+                    sensor = cursor.fetchone()
+
+                    if not sensor:
+                        return None
+
+                    # 2. 해당 센서의 최신 온습도 데이터 조회
+                    cursor.execute(
+                        """
+                        SELECT
+                            time,
+                            temp,
+                            humid
+                        FROM th_trans
+                        WHERE sen_id = %s
+                        ORDER BY time DESC
+                        LIMIT 1
+                        """,
+                        (sensor["sen_id"],),
+                    )
+                    latest = cursor.fetchone()
+
+                    return {
+                        "sen_id": sensor["sen_id"],
+                        "sensor_id": sensor["sensor_id"],
+                        "sen_name": sensor["sen_name"],
+                        "sensor_type": sensor["sensor_type"],
+                        "sen_locate": sensor["sen_locate"],
+                        "is_online": sensor["is_online"],
+                        "time": latest["time"] if latest else None,
+                        "temp": latest["temp"] if latest else None,
+                        "humid": latest["humid"] if latest else None,
+                    }
+
+        except Exception as e:
+            logging.error(
+                "get_latest_th_by_sensor_id 오류 | sensor_id=%s | error=%s",
+                sensor_id,
+                e,
+            )
+            return None
+
 
     # ------------------------------------------------------------------
     # 웹 대시보드용 최신 데이터

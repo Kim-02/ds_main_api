@@ -2,6 +2,7 @@
 import os
 import queue
 import threading
+import time
 
 from ai.vlm.fire_pipeline.detector import YoloDetector, get_count_text, has_any_class
 from ai.vlm.fire_pipeline.normalizer import WindowNormalizer
@@ -96,6 +97,10 @@ class ExportFinalPipeline:
             print(*items, flush=True)
 
     def run_capture_loop(self):
+        if getattr(self.config, "camera_id", None) is not None:
+            if self.run_buffer_capture_loop():
+                return
+
         video = VideoSource(self.config.video_source)
 
         if video.open() == False:
@@ -125,6 +130,63 @@ class ExportFinalPipeline:
                     next_sample_time = next_sample_time + self.config.sample_gap
         finally:
             video.release()
+
+    def run_buffer_capture_loop(self):
+        try:
+            from cctv.buffer import get_buffer_status, get_recent_frames
+        except Exception as exc:
+            self.log_status("[BUFFER] cctv.buffer 사용 불가, RTSP로 전환:", exc)
+            return False
+
+        camera_id = int(self.config.camera_id)
+        startup_wait = float(getattr(self.config, "buffer_startup_wait_seconds", 5.0))
+        started_at = time.monotonic()
+        origin_timestamp = None
+        last_timestamp = 0.0
+        next_sample_time = 0.0
+        frame_number = 1
+
+        self.log_status("fire_pipeline 버퍼 입력 시작:", camera_id)
+
+        while self.running:
+            frames = get_recent_frames(
+                camera_id,
+                seconds=max(self.config.sample_gap * 3, self.config.buffer_recent_seconds)
+            )
+            if not frames:
+                status = get_buffer_status(camera_id)
+                if (
+                    time.monotonic() - started_at >= startup_wait
+                    and int(status.get("frame_count") or 0) == 0
+                ):
+                    self.log_status("[BUFFER] 버퍼 프레임 없음, RTSP로 전환:", status)
+                    return False
+
+                time.sleep(self.config.buffer_empty_sleep_seconds)
+                continue
+
+            latest = frames[-1]
+            source_timestamp = float(latest["timestamp"])
+            if source_timestamp <= last_timestamp:
+                time.sleep(self.config.buffer_duplicate_sleep_seconds)
+                continue
+
+            last_timestamp = source_timestamp
+            if origin_timestamp is None:
+                origin_timestamp = source_timestamp
+
+            current_time = source_timestamp - origin_timestamp
+            if current_time >= next_sample_time:
+                put_latest(
+                    self.yolo_queue,
+                    (frame_number, current_time, latest["frame"].copy())
+                )
+                frame_number = frame_number + 1
+                next_sample_time = next_sample_time + self.config.sample_gap
+
+            time.sleep(self.config.buffer_duplicate_sleep_seconds)
+
+        return True
 
     def set_latest_summary(self, summary):
         with self.latest_lock:

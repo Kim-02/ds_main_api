@@ -29,17 +29,21 @@ class Settings(BaseSettings):
     vllm_dtype: str = "float16"
     vllm_gpu_memory_utilization: float = 0.5
     vllm_max_model_len: int = 4096
-    vllm_max_num_seqs: int = 3
+    vllm_max_num_seqs: int = 4
     vllm_max_num_batched_tokens: int = 4096
     vllm_limit_mm_per_prompt: str = "image=1,video=0"
     vllm_startup_timeout_seconds: int = 600
     vllm_startup_poll_seconds: float = 3.0
     vllm_log_path: str = "logs/vllm_server.log"
     vllm_progress_path: str = "logs/vllm_startup_progress.json"
+    vlm_timeshare_max_concurrent: int = 2
+    vlm_timeshare_cooldown_seconds: float = 0.1
 
     # Camera / YOLO
     frame_buffer_minutes: int = 10
     frame_buffer_seconds: int = 10
+    frame_buffer_sample_interval_seconds: float = 0.5
+    rtsp_reconnect_delay_seconds: float = 2.0
     yolo_model_path: str = "0507_best.engine"
     yolo_confidence: float = 0.5
     yolo_preload_on_startup: bool = True
@@ -53,10 +57,44 @@ class Settings(BaseSettings):
     fire_pipeline_vllm_model: str = ""
     fire_pipeline_vllm_api_key: str = ""
     fire_pipeline_rtsp_path: str = "/stream"
+    fire_pipeline_sample_gap_seconds: float = 0.5
+    fire_pipeline_vlm_gap_seconds: float = 10.0
+    fire_pipeline_buffer_startup_wait_seconds: float = 5.0
+    fire_pipeline_buffer_recent_seconds: float = 1.5
+    fire_pipeline_buffer_empty_sleep_seconds: float = 0.1
+    fire_pipeline_buffer_duplicate_sleep_seconds: float = 0.05
+    fire_pipeline_normalized_keep_count: int = 3
+    fire_pipeline_queue_size: int = 3
+    fire_pipeline_abnormal_missing_limit: int = 4
+    fire_pipeline_validation_compare_height: int = 360
+    fire_pipeline_vllm_timeout_seconds: int = 30
+    fire_pipeline_validation_max_tokens: int = 128
+    fire_pipeline_validation_prompt_max_chars: int = 2600
+    fire_pipeline_analysis_max_tokens: int = 128
+    fire_pipeline_analysis_prompt_max_chars: int = 3000
 
     # Detection defaults
     default_temp_threshold: float = 35.0
     default_heartrate_threshold: int = 120
+    sensor_register_interval_ms: int = 5000
+    watch_pipeline_interval_seconds: int = 30
+    watch_hr_stale_seconds: int = 15
+    watch_alert_duration_ms: int = 5000
+    watch_alert_reset_after_ms: int = 5000
+    watch_camera_vlm_session_seconds: int = 120
+    watch_camera_vlm_analysis_interval_seconds: int = 30
+    camera_vlm_request_timeout_seconds: int = 30
+    rest_forced_rest_work_minutes: int = 120
+    rest_default_age: int = 40
+    rest_default_gender: int = 1
+    rest_default_height_cm: float = 170.0
+    rest_default_weight_kg: float = 70.0
+    rest_default_work_duration_min: int = 0
+    temperature_vlm_threshold: float = 38.0
+    temperature_vlm_check_interval_seconds: int = 10
+    temperature_vlm_session_seconds: int = 120
+    temperature_vlm_analysis_interval_seconds: int = 30
+    temperature_vlm_stale_seconds: int = 60
 
     # Firebase
     firebase_credentials_path: str = "firebase-credentials.json"

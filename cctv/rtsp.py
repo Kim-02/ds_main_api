@@ -137,7 +137,7 @@ _readers: dict[int, RtspReader] = {}
 _readers_lock = threading.Lock()
 
 
-def register_reader(camera_id: int, rtsp_url: str) -> bool:
+def register_reader(camera_id: int, rtsp_url: str, reconnect_delay: float = 2.0) -> bool:
     """Start or replace the reader for a camera.
 
     Returns True when a new reader was started, False when an existing reader
@@ -153,7 +153,11 @@ def register_reader(camera_id: int, rtsp_url: str) -> bool:
         if current is not None:
             current.stop()
 
-        reader = RtspReader(camera_id=camera_id, rtsp_url=rtsp_url)
+        reader = RtspReader(
+            camera_id=camera_id,
+            rtsp_url=rtsp_url,
+            reconnect_delay=reconnect_delay,
+        )
         _readers[camera_id] = reader
         reader.start()
         return True

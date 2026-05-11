@@ -6,6 +6,8 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from ai.vlm.timeshare import run_vlm_timeshare
+
 
 def image_to_data_url(image_path):
     path = Path(image_path)
@@ -89,46 +91,51 @@ class OpenAiCompatibleVlm:
             self.client = client
 
     def request_text(self, prompt, image_path="", max_tokens=256, temperature=0.2, stream=False, on_text=None):
-        content = make_content(prompt, image_path)
+        label = _make_timeshare_label(self.model, image_path, stream)
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": content
-                }
-            ],
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=stream
-        )
+        def _request():
+            content = make_content(prompt, image_path)
 
-        if stream == False:
-            text = response.choices[0].message.content
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": content
+                    }
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=stream
+            )
 
-            if on_text is not None:
-                on_text(text)
+            if stream == False:
+                text = response.choices[0].message.content
+
+                if on_text is not None:
+                    on_text(text)
+
+                return text
+
+            text = ""
+
+            for chunk in response:
+                if len(chunk.choices) == 0:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                if delta.content is None:
+                    continue
+
+                text = text + delta.content
+
+                if on_text is not None:
+                    on_text(text)
 
             return text
 
-        text = ""
-
-        for chunk in response:
-            if len(chunk.choices) == 0:
-                continue
-
-            delta = chunk.choices[0].delta
-
-            if delta.content is None:
-                continue
-
-            text = text + delta.content
-
-            if on_text is not None:
-                on_text(text)
-
-        return text
+        return run_vlm_timeshare(label, _request)
 
     def request_json(self, prompt, image_path="", max_tokens=512, temperature=0.0):
         text = self.request_text(
@@ -139,3 +146,10 @@ class OpenAiCompatibleVlm:
             stream=False
         )
         return extract_json(text)
+
+
+def _make_timeshare_label(model: str, image_path: str, stream: bool) -> str:
+    source = "text"
+    if image_path:
+        source = Path(image_path).name
+    return f"cctv.fire_pipeline model={model} source={source} stream={stream}"

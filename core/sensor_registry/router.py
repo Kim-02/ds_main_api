@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 
+from config import settings
+
 from .schemas import SensorRegisterReq, SensorUnregisterReq
 
 router = APIRouter(prefix="/api/sensors", tags=["sensor-registry"])
@@ -44,12 +46,20 @@ def register_sensors(req: SensorRegisterReq, request: Request):
         raise HTTPException(status_code=500, detail="센서 DB 등록 실패")
 
     mqtt_svc = request.app.state.mqtt_sensor_service
+    watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
+    temperature_scheduler = getattr(request.app.state, "temperature_scheduler", None)
     for sensor in selected:
         mqtt_svc.publish_register(
             sensor_id=sensor["sensor_id"],
             site_id=f"jetson-{jetson_id:02d}",
-            interval_ms=5000,
+            interval_ms=settings.sensor_register_interval_ms,
         )
+        sensor_type = str(sensor.get("sensor_type") or "").lower()
+        if sensor_type == "heart_band" and watch_scheduler is not None:
+            watch_scheduler.register(sensor["sensor_id"])
+        if sensor_type in {"temp_humidity", "temperature_humidity", "th", "temperature"}:
+            if temperature_scheduler is not None:
+                temperature_scheduler.register(sensor["sensor_id"])
 
     return {"status": "success", "message": f"{len(selected)}개 센서 등록 완료"}
 
@@ -58,6 +68,14 @@ def register_sensors(req: SensorRegisterReq, request: Request):
 def unregister_sensor(req: SensorUnregisterReq, request: Request):
     mqtt_svc = request.app.state.mqtt_sensor_service
     mqtt_svc.publish_unregister(req.sensor_id)
+
+    watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
+    if watch_scheduler is not None:
+        watch_scheduler.unregister(req.sensor_id)
+
+    temperature_scheduler = getattr(request.app.state, "temperature_scheduler", None)
+    if temperature_scheduler is not None:
+        temperature_scheduler.unregister(req.sensor_id)
 
     db = request.app.state.db
     if not db.unregister_sensor_by_sensor_id(req.sensor_id):
