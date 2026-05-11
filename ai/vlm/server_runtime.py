@@ -389,22 +389,36 @@ async def preload_yolo_engine(settings: Any) -> None:
     def _load() -> int:
         import numpy as np
 
+        from ai.vlm.yolo_runtime import configure_ultralytics_runtime, ensure_tensorrt_available
         from ai.vlm.fire_pipeline.detector import YoloDetector
 
+        logger.info("[YOLO] runtime configure 시작")
+        configure_ultralytics_runtime()
+        logger.info("[YOLO] TensorRT 확인 시작 model=%s", settings.fire_pipeline_yolo_model_path)
+        tensorrt_version = ensure_tensorrt_available(settings.fire_pipeline_yolo_model_path)
+        logger.info("[YOLO] TensorRT 확인 완료 version=%s", tensorrt_version)
+        logger.info("[YOLO] detector 생성 시작 model=%s", settings.fire_pipeline_yolo_model_path)
         detector = YoloDetector(
             settings.fire_pipeline_yolo_model_path,
             detect_classes=["person", "fire", "smoke"],
             confidence=settings.yolo_confidence,
         )
+        logger.info("[YOLO] detector 생성 완료 model=%s", settings.fire_pipeline_yolo_model_path)
 
         if not settings.yolo_warmup_on_startup:
             return -1
 
+        logger.info("[YOLO] warmup inference 시작")
         dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
         detections, _ = detector.detect(dummy_frame)
+        logger.info("[YOLO] warmup inference 종료 detections=%s", len(detections))
         return len(detections)
 
-    detection_count = await asyncio.to_thread(_load)
+    try:
+        detection_count = await asyncio.to_thread(_load)
+    except Exception:
+        logger.exception("[YOLO] preload 실패 model=%s", settings.fire_pipeline_yolo_model_path)
+        raise
 
     if detection_count >= 0:
         logger.info(

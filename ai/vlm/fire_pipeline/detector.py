@@ -1,4 +1,14 @@
+import logging
+
+from ai.vlm.yolo_runtime import configure_ultralytics_runtime, ensure_tensorrt_available
+
+
+configure_ultralytics_runtime()
+
 from ultralytics import YOLO
+
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_class_name(class_name):
@@ -89,7 +99,14 @@ def get_count_text(detections):
 
 class YoloDetector:
     def __init__(self, model_path, detect_classes=None, confidence=None):
-        self.model = YOLO(model_path)
+        logger.info(
+            "[YOLO] detector init start model=%s detect_classes=%s confidence=%s",
+            model_path,
+            detect_classes,
+            confidence,
+        )
+        ensure_tensorrt_available(model_path)
+        self.model = YOLO(model_path, task="detect")
         self.detect_classes = None
         self.confidence = confidence
         self.class_ids = None
@@ -97,6 +114,13 @@ class YoloDetector:
         if detect_classes is not None:
             self.detect_classes = [normalize_class_name(name) for name in detect_classes]
             self.class_ids = self._resolve_class_ids()
+
+        logger.info(
+            "[YOLO] detector init complete model=%s resolved_class_ids=%s names=%s",
+            model_path,
+            self.class_ids,
+            getattr(self.model, "names", None),
+        )
 
     def _resolve_class_ids(self):
         names = getattr(self.model, "names", {})
