@@ -1,54 +1,58 @@
 from fastapi import HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi.concurrency import run_in_threadpool
 
-from database.crud import sensor as crud
-from database.models import Sensor, SensorType
-
+from config import settings
 from .schemas import TemperatureSensorCreate, TemperatureSensorUpdate
 
 
-async def list_sensors(db: AsyncSession, process_id: int | None = None) -> list[Sensor]:
-    sensors = await crud.get_all(db, process_id=process_id)
-    return [s for s in sensors if s.sensor_type == SensorType.temperature]
+def _row_to_out(row: dict | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "id": row["sen_id"],
+        "device_id": row.get("sensor_id") or "",
+        "name": row.get("sen_name") or "",
+        "process_id": row.get("space_id"),
+        "is_active": bool(row.get("is_online", False)),
+        "registered_at": row.get("registered_at"),
+        "temperature_sensor": {
+            "threshold_temperature": settings.default_temp_threshold,
+            "threshold_humidity": settings.default_humidity_threshold,
+        },
+    }
 
 
-async def get_sensor(db: AsyncSession, sensor_id: int) -> Sensor:
-    s = await crud.get_by_id(db, sensor_id)
-    if not s or s.sensor_type != SensorType.temperature:
+async def list_sensors(db, process_id: int | None = None) -> list[dict]:
+    rows = await run_in_threadpool(db.get_temp_sensors, process_id)
+    return [_row_to_out(r) for r in rows]
+
+
+async def get_sensor(db, sensor_id: int) -> dict:
+    row = await run_in_threadpool(db.get_temp_sensor_by_id, sensor_id)
+    if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Temperature sensor not found")
-    return s
+    return _row_to_out(row)
 
 
-async def create_sensor(db: AsyncSession, data: TemperatureSensorCreate) -> Sensor:
-    sensor_data = {"device_id": data.device_id, "name": data.name, "process_id": data.process_id}
-    return await crud.create_temperature_sensor(
-        db,
-        sensor_data=sensor_data,
-        threshold_temperature=data.threshold_temperature,
-        threshold_humidity=data.threshold_humidity,
+async def create_sensor(db, data: TemperatureSensorCreate) -> dict:
+    row = await run_in_threadpool(
+        db.create_temp_sensor,
+        data.device_id,
+        data.name,
+        data.process_id,
     )
+    if not row:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="생성 실패")
+    return _row_to_out(row)
 
 
-async def update_sensor(db: AsyncSession, sensor_id: int, data: TemperatureSensorUpdate) -> Sensor:
-    sensor = await get_sensor(db, sensor_id)
-    top = {}
-    sub = {}
-    for field, value in data.model_dump(exclude_none=True).items():
-        if field in ("name", "is_active"):
-            top[field] = value
-        else:
-            sub[field] = value
-
-    if top:
-        await crud.update(db, sensor, **top)
-    if sub and sensor.temperature_sensor:
-        for k, v in sub.items():
-            setattr(sensor.temperature_sensor, k, v)
-        await db.flush()
-        await db.refresh(sensor)
-    return sensor
+async def update_sensor(db, sensor_id: int, data: TemperatureSensorUpdate) -> dict:
+    await get_sensor(db, sensor_id)
+    kwargs = data.model_dump(exclude_none=True)
+    row = await run_in_threadpool(db.update_temp_sensor, sensor_id, **kwargs)
+    return _row_to_out(row)
 
 
-async def delete_sensor(db: AsyncSession, sensor_id: int) -> None:
-    sensor = await get_sensor(db, sensor_id)
-    await crud.delete(db, sensor)
+async def delete_sensor(db, sensor_id: int) -> None:
+    await get_sensor(db, sensor_id)
+    await run_in_threadpool(db.delete_temp_sensor, sensor_id)

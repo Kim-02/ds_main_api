@@ -1,16 +1,13 @@
-from typing import Annotated, Any, Optional
+from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from database.models import AnomalyStatus
-from database.session import get_db
 
 from . import service
 from .schemas import (
     AnomalyEventDetailOut,
     AnomalyEventOut,
+    AnomalyStatus,
     ReportCreate,
     ReportOut,
     ReportUpdate,
@@ -18,57 +15,57 @@ from .schemas import (
     VLMQueryOut,
 )
 
-DB = Annotated[AsyncSession, Depends(get_db)]
-
 events_router = APIRouter(prefix="/anomaly-events", tags=["anomaly-events"])
 
 
 @events_router.get("/", response_model=list[AnomalyEventOut])
 async def list_anomaly_events(
-    db: DB,
+    request: Request,
     process_id: Optional[int] = Query(None),
     event_status: Optional[AnomalyStatus] = Query(None),
 ):
-    return await service.list_anomaly_events(db, process_id=process_id, event_status=event_status)
+    return await service.list_anomaly_events(
+        request.app.state.db, process_id=process_id, event_status=event_status
+    )
 
 
 @events_router.get("/{event_id}", response_model=AnomalyEventDetailOut)
-async def get_anomaly_event(event_id: int, db: DB):
-    return await service.get_anomaly_event(db, event_id)
+async def get_anomaly_event(event_id: int, request: Request):
+    return await service.get_anomaly_event(request.app.state.db, event_id)
 
 
 @events_router.post("/{event_id}/stop", response_model=AnomalyEventOut)
-async def stop_detection(event_id: int, req: StopDetectionRequest, db: DB):
-    return await service.stop_detection(db, event_id, req)
+async def stop_detection(event_id: int, req: StopDetectionRequest, request: Request):
+    return await service.stop_detection(request.app.state.db, event_id, req)
 
 
 @events_router.get("/{event_id}/vlm-queries", response_model=list[VLMQueryOut])
-async def get_vlm_queries(event_id: int, db: DB):
-    from database.crud import report as crud
-    return await crud.get_vlm_queries(db, event_id)
+async def get_vlm_queries(event_id: int, request: Request):
+    row = await service.get_anomaly_event(request.app.state.db, event_id)
+    return row.get("vlm_queries", [])
 
 
 reports_router = APIRouter(prefix="/reports", tags=["reports"])
 
 
 @reports_router.get("/", response_model=list[ReportOut])
-async def list_reports(db: DB):
-    return await service.list_reports(db)
+async def list_reports(request: Request):
+    return await service.list_reports(request.app.state.db)
 
 
 @reports_router.post("/", response_model=ReportOut, status_code=status.HTTP_201_CREATED)
-async def create_report(data: ReportCreate, db: DB):
-    return await service.create_report(db, data)
+async def create_report(data: ReportCreate, request: Request):
+    return await service.create_report(request.app.state.db, data)
 
 
 @reports_router.get("/{report_id}", response_model=ReportOut)
-async def get_report(report_id: int, db: DB):
-    return await service.get_report(db, report_id)
+async def get_report(report_id: int, request: Request):
+    return await service.get_report(request.app.state.db, report_id)
 
 
 @reports_router.put("/{report_id}", response_model=ReportOut)
-async def update_report(report_id: int, data: ReportUpdate, db: DB):
-    return await service.update_report(db, report_id, data)
+async def update_report(report_id: int, data: ReportUpdate, request: Request):
+    return await service.update_report(request.app.state.db, report_id, data)
 
 
 # ------------------------------------------------------------------
@@ -84,7 +81,7 @@ class VlmAnalysisReq(BaseModel):
     ip_address: str
     ev_code_name: str
     message: str
-    time: Optional[Any] = None
+    time: Optional[str] = None
 
 
 internal_router = APIRouter(prefix="/api", tags=["internal"])

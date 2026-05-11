@@ -5,10 +5,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Database
-    jetson_db_url: str = "mysql+pymysql://user:password@127.0.0.1:3306/ON_SAFE"
-    corporate_db_url: str = ""
-
     # MQTT
     mqtt_broker_host: str = "localhost"
     mqtt_broker_port: int = 1883
@@ -76,6 +72,7 @@ class Settings(BaseSettings):
 
     # Detection defaults
     default_temp_threshold: float = 35.0
+    default_humidity_threshold: float = 80.0
     default_heartrate_threshold: int = 120
     sensor_register_interval_ms: int = 5000
     watch_pipeline_interval_seconds: int = 30

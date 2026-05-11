@@ -1,9 +1,21 @@
+import enum
 from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel
 
-from database.models import AnomalyStatus, AnomalyType
+
+class AnomalyType(str, enum.Enum):
+    temperature = "temperature"
+    heartrate = "heartrate"
+    cctv = "cctv"
+    unknown = "unknown"
+
+
+class AnomalyStatus(str, enum.Enum):
+    active = "active"
+    resolved = "resolved"
+    stopped = "stopped"
 
 
 class VLMQueryOut(BaseModel):
@@ -19,13 +31,13 @@ class VLMQueryOut(BaseModel):
 
 class AnomalyEventOut(BaseModel):
     id: int
-    anomaly_type: AnomalyType
+    anomaly_type: str
     process_id: int
     sensor_id: int
     triggered_value: Optional[float]
     start_time: datetime
     end_time: Optional[datetime]
-    status: AnomalyStatus
+    status: str
 
     model_config = {"from_attributes": True}
 

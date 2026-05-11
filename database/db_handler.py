@@ -891,6 +891,9 @@ class DatabaseHandler:
         camera_id: str,
         camera_pw: str,
         rtsp_url: str | None = None,
+        space_id: int | None = None,
+        sen_name: str | None = None,
+        sen_locate: str | None = None,
     ):
         """
         카메라를 sensor + camera_info에 등록한다.
@@ -904,15 +907,16 @@ class DatabaseHandler:
 
                         cursor.execute(
                             """
-                            SELECT 1
+                            SELECT sen_id
                             FROM camera_info
                             WHERE ip_address = %s
                             LIMIT 1
                             """,
                             (ip_address,),
                         )
-                        if cursor.fetchone():
-                            return None
+                        existing = cursor.fetchone()
+                        if existing:
+                            return self.get_cctv_by_sen_id(existing["sen_id"])
 
                         cursor.execute(
                             """
@@ -926,7 +930,8 @@ class DatabaseHandler:
                         if not jetson:
                             raise ValueError("등록된 Jetson 정보가 없습니다.")
 
-                        auto_name = f"CAM_{ip_address.split('.')[-1]}"
+                        auto_name = sen_name or f"CAM_{ip_address.split('.')[-1]}"
+                        auto_loc = sen_locate or jetson["jetson_loc"]
                         sensor_id = f"camera-{ip_address.replace('.', '-')}"
 
                         cursor.execute(
@@ -945,11 +950,12 @@ class DatabaseHandler:
                                 last_seen_at,
                                 registered_at,
                                 created_at,
-                                updated_at
+                                updated_at,
+                                space_id
                             ) VALUES (
                                 %s, %s, %s, %s, %s,
                                 %s, %s, %s, %s, %s,
-                                NOW(), NOW(), NOW(), NOW()
+                                NOW(), NOW(), NOW(), NOW(), %s
                             )
                             """,
                             (
@@ -957,12 +963,13 @@ class DatabaseHandler:
                                 jetson["jetson_id"],
                                 "camera",
                                 auto_name,
-                                jetson["jetson_loc"],
+                                auto_loc,
                                 "ip_camera",
                                 None,
                                 None,
                                 ip_address,
                                 1,
+                                space_id,
                             ),
                         )
 
@@ -975,24 +982,21 @@ class DatabaseHandler:
                                 ip_address,
                                 camera_id,
                                 camera_pw,
-                                health
+                                health,
+                                space_id
                             ) VALUES (
-                                %s, %s, %s, %s, 1
+                                %s, %s, %s, %s, 1, %s
                             )
                             """,
-                            (new_sen_id, ip_address, camera_id, camera_pw),
+                            (new_sen_id, ip_address, camera_id, camera_pw, space_id),
                         )
 
                     conn.commit()
 
-                    return {
-                        "sen_id": new_sen_id,
-                        "sensor_id": sensor_id,
-                        "ip_address": ip_address,
-                        "camera_id": camera_id,
-                        "camera_pw": camera_pw,
-                        "rtsp_url": rtsp_url,
-                    }
+                    row = self.get_cctv_by_sen_id(new_sen_id)
+                    if row is not None:
+                        row["rtsp_url"] = rtsp_url
+                    return row
 
                 except Exception:
                     conn.rollback()
@@ -1002,7 +1006,50 @@ class DatabaseHandler:
             logging.error("register_camera_info 오류: %s", e)
             return False
 
-    def get_cctv_list(self) -> list[dict]:
+    def get_cctv_list(self, space_id: int | None = None) -> list[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    params = []
+                    where_sql = "WHERE s.sensor_type IN ('camera', 'cctv')"
+                    if space_id is not None:
+                        where_sql += " AND COALESCE(c.space_id, s.space_id) = %s"
+                        params.append(space_id)
+
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            c.sen_id,
+                            c.ip_address,
+                            c.camera_id,
+                            c.camera_pw,
+                            c.health,
+                            s.sensor_id,
+                            s.sen_name,
+                            s.sen_locate,
+                            s.is_online,
+                            s.registered_at,
+                            s.created_at,
+                            s.updated_at,
+                            COALESCE(c.space_id, s.space_id) AS space_id,
+                            sp.space_name
+                        FROM camera_info c
+                        JOIN sensor s
+                          ON c.sen_id = s.sen_id
+                        LEFT JOIN ds_space sp
+                          ON COALESCE(c.space_id, s.space_id) = sp.space_id
+                        {where_sql}
+                        ORDER BY s.sen_name
+                        """,
+                        tuple(params),
+                    )
+                    return cursor.fetchall()
+
+        except Exception as e:
+            logging.error("get_cctv_list 오류: %s", e)
+            return []
+
+    def get_cctv_by_sen_id(self, sen_id: int) -> dict | None:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -1012,22 +1059,148 @@ class DatabaseHandler:
                             c.sen_id,
                             c.ip_address,
                             c.camera_id,
+                            c.camera_pw,
                             c.health,
                             s.sensor_id,
                             s.sen_name,
                             s.sen_locate,
-                            s.is_online
+                            s.is_online,
+                            s.registered_at,
+                            s.created_at,
+                            s.updated_at,
+                            COALESCE(c.space_id, s.space_id) AS space_id,
+                            sp.space_name
                         FROM camera_info c
                         JOIN sensor s
                           ON c.sen_id = s.sen_id
-                        ORDER BY s.sen_name
-                        """
+                        LEFT JOIN ds_space sp
+                          ON COALESCE(c.space_id, s.space_id) = sp.space_id
+                        WHERE c.sen_id = %s
+                          AND s.sensor_type IN ('camera', 'cctv')
+                        LIMIT 1
+                        """,
+                        (sen_id,),
                     )
-                    return cursor.fetchall()
+                    return cursor.fetchone()
 
         except Exception as e:
-            logging.error("get_cctv_list 오류: %s", e)
-            return []
+            logging.error("get_cctv_by_sen_id 오류: %s", e)
+            return None
+
+    def update_camera_info(
+        self,
+        sen_id: int,
+        *,
+        ip_address: str | None = None,
+        camera_id: str | None = None,
+        camera_pw: str | None = None,
+        sen_name: str | None = None,
+        is_online: bool | None = None,
+        health: int | bool | None = None,
+        space_id: int | None = None,
+    ) -> dict | None:
+        try:
+            with self._get_connection() as conn:
+                try:
+                    with conn.cursor() as cursor:
+                        conn.begin()
+
+                        sensor_sets = []
+                        sensor_params = []
+                        camera_sets = []
+                        camera_params = []
+
+                        if ip_address is not None:
+                            sensor_sets.append("ip_addr = %s")
+                            sensor_params.append(ip_address)
+                            camera_sets.append("ip_address = %s")
+                            camera_params.append(ip_address)
+
+                        if sen_name is not None:
+                            sensor_sets.append("sen_name = %s")
+                            sensor_params.append(sen_name)
+
+                        if is_online is not None:
+                            sensor_sets.append("is_online = %s")
+                            sensor_params.append(1 if is_online else 0)
+
+                        if space_id is not None:
+                            sensor_sets.append("space_id = %s")
+                            sensor_params.append(space_id)
+                            camera_sets.append("space_id = %s")
+                            camera_params.append(space_id)
+
+                        if camera_id is not None:
+                            camera_sets.append("camera_id = %s")
+                            camera_params.append(camera_id)
+
+                        if camera_pw is not None:
+                            camera_sets.append("camera_pw = %s")
+                            camera_params.append(camera_pw)
+
+                        if health is not None:
+                            camera_sets.append("health = %s")
+                            camera_params.append(1 if health else 0)
+
+                        if sensor_sets:
+                            sensor_params.append(sen_id)
+                            cursor.execute(
+                                f"""
+                                UPDATE sensor
+                                SET {", ".join(sensor_sets)}
+                                WHERE sen_id = %s
+                                """,
+                                tuple(sensor_params),
+                            )
+
+                        if camera_sets:
+                            camera_params.append(sen_id)
+                            cursor.execute(
+                                f"""
+                                UPDATE camera_info
+                                SET {", ".join(camera_sets)}
+                                WHERE sen_id = %s
+                                """,
+                                tuple(camera_params),
+                            )
+
+                    conn.commit()
+
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            return self.get_cctv_by_sen_id(sen_id)
+
+        except Exception as e:
+            logging.error("update_camera_info 오류: %s", e)
+            return None
+
+    def delete_camera_info(self, sen_id: int) -> bool:
+        try:
+            with self._get_connection() as conn:
+                try:
+                    with conn.cursor() as cursor:
+                        conn.begin()
+                        cursor.execute("DELETE FROM camera_info WHERE sen_id = %s", (sen_id,))
+                        cursor.execute(
+                            """
+                            DELETE FROM sensor
+                            WHERE sen_id = %s
+                              AND sensor_type IN ('camera', 'cctv')
+                            """,
+                            (sen_id,),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            return True
+
+        except Exception as e:
+            logging.error("delete_camera_info 오류: %s", e)
+            return False
 
     # ------------------------------------------------------------------
     # 이벤트 / 리포트
@@ -1646,3 +1819,452 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("get_web_sensor_hb 오류: %s", e)
             return []
+
+    # ------------------------------------------------------------------
+    # ds_space (공정/구역) CRUD
+    # ------------------------------------------------------------------
+
+    def get_all_spaces(self) -> list[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT space_id, space_name FROM ds_space ORDER BY space_id")
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_all_spaces 오류: %s", e)
+            return []
+
+    def get_space_by_id(self, space_id: int) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT space_id, space_name FROM ds_space WHERE space_id = %s",
+                        (space_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_space_by_id 오류: %s", e)
+            return None
+
+    def create_space(self, space_name: str) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO ds_space (space_name) VALUES (%s)",
+                        (space_name,),
+                    )
+                    space_id = cursor.lastrowid
+                conn.commit()
+            return self.get_space_by_id(space_id)
+        except Exception as e:
+            logging.error("create_space 오류: %s", e)
+            return None
+
+    def update_space(self, space_id: int, space_name: str) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE ds_space SET space_name = %s WHERE space_id = %s",
+                        (space_name, space_id),
+                    )
+                conn.commit()
+            return self.get_space_by_id(space_id)
+        except Exception as e:
+            logging.error("update_space 오류: %s", e)
+            return None
+
+    def delete_space(self, space_id: int) -> bool:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("DELETE FROM ds_space WHERE space_id = %s", (space_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            logging.error("delete_space 오류: %s", e)
+            return False
+
+    # ------------------------------------------------------------------
+    # worker CRUD
+    # ------------------------------------------------------------------
+
+    def create_worker(self, dept_id: int, name: str, is_manager: int = 0) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO worker (dept_id, name, is_manager) VALUES (%s, %s, %s)",
+                        (dept_id, name, is_manager),
+                    )
+                conn.commit()
+            return self.get_worker_by_dept_id(dept_id)
+        except Exception as e:
+            logging.error("create_worker 오류: %s", e)
+            return None
+
+    def update_worker(self, dept_id: int, **kwargs) -> Optional[dict]:
+        allowed = {"name", "is_manager", "sen_id"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return self.get_worker_by_dept_id(dept_id)
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f"UPDATE worker SET {set_clause} WHERE dept_id = %s",
+                        (*fields.values(), dept_id),
+                    )
+                conn.commit()
+            return self.get_worker_by_dept_id(dept_id)
+        except Exception as e:
+            logging.error("update_worker 오류: %s", e)
+            return None
+
+    def delete_worker(self, dept_id: int) -> bool:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("DELETE FROM worker WHERE dept_id = %s", (dept_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            logging.error("delete_worker 오류: %s", e)
+            return False
+
+    # ------------------------------------------------------------------
+    # sensor (온습도 타입) CRUD — temperature router 용
+    # ------------------------------------------------------------------
+
+    def get_temp_sensors(self, space_id: int | None = None) -> list[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    q = """
+                        SELECT sen_id, sensor_id, sen_name, space_id,
+                               is_online, registered_at, sensor_type
+                        FROM sensor
+                        WHERE sensor_type = 'temp_humidity'
+                    """
+                    params: tuple = ()
+                    if space_id is not None:
+                        q += " AND space_id = %s"
+                        params = (space_id,)
+                    q += " ORDER BY sen_id"
+                    cursor.execute(q, params)
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_temp_sensors 오류: %s", e)
+            return []
+
+    def get_temp_sensor_by_id(self, sen_id: int) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT sen_id, sensor_id, sen_name, space_id,
+                               is_online, registered_at, sensor_type
+                        FROM sensor
+                        WHERE sen_id = %s AND sensor_type = 'temp_humidity'
+                        """,
+                        (sen_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_temp_sensor_by_id 오류: %s", e)
+            return None
+
+    def create_temp_sensor(
+        self,
+        sensor_id: str,
+        sen_name: str,
+        space_id: int | None = None,
+        jetson_id: int | None = None,
+    ) -> Optional[dict]:
+        try:
+            jetson_id = jetson_id or self._get_first_jetson_id()
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO sensor
+                          (sensor_id, jetson_id, sensor_type, sen_name, sen_locate,
+                           space_id, registered_at, created_at, updated_at)
+                        VALUES (%s, %s, 'temp_humidity', %s, '', %s, NOW(), NOW(), NOW())
+                        """,
+                        (sensor_id, jetson_id, sen_name, space_id),
+                    )
+                    sen_id = cursor.lastrowid
+                conn.commit()
+            return self.get_temp_sensor_by_id(sen_id)
+        except Exception as e:
+            logging.error("create_temp_sensor 오류: %s", e)
+            return None
+
+    def update_temp_sensor(self, sen_id: int, **kwargs) -> Optional[dict]:
+        mapping = {"name": "sen_name", "is_active": "is_online", "space_id": "space_id"}
+        fields = {mapping[k]: v for k, v in kwargs.items() if k in mapping}
+        if not fields:
+            return self.get_temp_sensor_by_id(sen_id)
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f"UPDATE sensor SET {set_clause} WHERE sen_id = %s",
+                        (*fields.values(), sen_id),
+                    )
+                conn.commit()
+            return self.get_temp_sensor_by_id(sen_id)
+        except Exception as e:
+            logging.error("update_temp_sensor 오류: %s", e)
+            return None
+
+    def delete_temp_sensor(self, sen_id: int) -> bool:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM sensor WHERE sen_id = %s AND sensor_type = 'temp_humidity'",
+                        (sen_id,),
+                    )
+                conn.commit()
+            return True
+        except Exception as e:
+            logging.error("delete_temp_sensor 오류: %s", e)
+            return False
+
+    def _get_first_jetson_id(self) -> int:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT jetson_id FROM jetson LIMIT 1")
+                    row = cursor.fetchone()
+                    return row["jetson_id"] if row else 1
+        except Exception:
+            return 1
+
+    # ------------------------------------------------------------------
+    # event (이상 이벤트) CRUD
+    # ------------------------------------------------------------------
+
+    def get_events(
+        self,
+        space_id: int | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    q = """
+                        SELECT e.event_id, e.ev_code_id, e.sen_id, e.message,
+                               e.detected_value, e.time AS start_time,
+                               e.end_time, e.status, e.measures,
+                               ec.ev_code_name AS anomaly_type,
+                               s.space_id
+                        FROM event e
+                        LEFT JOIN event_code ec ON e.ev_code_id = ec.ev_code_id
+                        LEFT JOIN sensor s ON e.sen_id = s.sen_id
+                    """
+                    conditions, params = [], []
+                    if space_id is not None:
+                        conditions.append(
+                            "e.sen_id IN (SELECT sen_id FROM sensor WHERE space_id = %s)"
+                        )
+                        params.append(space_id)
+                    if status is not None:
+                        conditions.append("e.status = %s")
+                        params.append(status)
+                    if conditions:
+                        q += " WHERE " + " AND ".join(conditions)
+                    q += " ORDER BY e.time DESC"
+                    cursor.execute(q, params)
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_events 오류: %s", e)
+            return []
+
+    def get_event_by_id(self, event_id: int) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT e.event_id, e.ev_code_id, e.sen_id, e.message,
+                               e.detected_value, e.time AS start_time,
+                               e.end_time, e.status, e.measures,
+                               ec.ev_code_name AS anomaly_type,
+                               s.space_id
+                        FROM event e
+                        LEFT JOIN event_code ec ON e.ev_code_id = ec.ev_code_id
+                        LEFT JOIN sensor s ON e.sen_id = s.sen_id
+                        WHERE e.event_id = %s
+                        """,
+                        (event_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_event_by_id 오류: %s", e)
+            return None
+
+    def update_event(self, event_id: int, **kwargs) -> Optional[dict]:
+        allowed = {"status", "end_time", "measures"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return self.get_event_by_id(event_id)
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f"UPDATE event SET {set_clause} WHERE event_id = %s",
+                        (*fields.values(), event_id),
+                    )
+                conn.commit()
+            return self.get_event_by_id(event_id)
+        except Exception as e:
+            logging.error("update_event 오류: %s", e)
+            return None
+
+    # ------------------------------------------------------------------
+    # vlm_query CRUD
+    # ------------------------------------------------------------------
+
+    def save_vlm_query(
+        self,
+        event_id: int,
+        prompt: str,
+        response: str | None = None,
+        frame_path: str | None = None,
+    ) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO vlm_query (event_id, prompt, response, frame_path)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (event_id, prompt, response, frame_path),
+                    )
+                    query_id = cursor.lastrowid
+                conn.commit()
+            return self.get_vlm_query_by_id(query_id)
+        except Exception as e:
+            logging.error("save_vlm_query 오류: %s", e)
+            return None
+
+    def get_vlm_query_by_id(self, query_id: int) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM vlm_query WHERE query_id = %s",
+                        (query_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_vlm_query_by_id 오류: %s", e)
+            return None
+
+    def get_vlm_queries_by_event(self, event_id: int) -> list[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM vlm_query WHERE event_id = %s ORDER BY queried_at",
+                        (event_id,),
+                    )
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_vlm_queries_by_event 오류: %s", e)
+            return []
+
+    # ------------------------------------------------------------------
+    # event_report CRUD
+    # ------------------------------------------------------------------
+
+    def get_all_reports(self) -> list[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM event_report ORDER BY created_at DESC"
+                    )
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_all_reports 오류: %s", e)
+            return []
+
+    def get_report_by_id(self, report_id: int) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM event_report WHERE report_id = %s",
+                        (report_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_report_by_id 오류: %s", e)
+            return None
+
+    def get_report_by_event_id(self, event_id: int) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM event_report WHERE event_id = %s",
+                        (event_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_report_by_event_id 오류: %s", e)
+            return None
+
+    def create_report(
+        self,
+        event_id: int,
+        content: str,
+        action_taken: str | None = None,
+        created_by: str | None = None,
+    ) -> Optional[dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO event_report (event_id, content, action_taken, created_by)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (event_id, content, action_taken, created_by),
+                    )
+                    report_id = cursor.lastrowid
+                conn.commit()
+            return self.get_report_by_id(report_id)
+        except Exception as e:
+            logging.error("create_report 오류: %s", e)
+            return None
+
+    def update_report(self, report_id: int, **kwargs) -> Optional[dict]:
+        allowed = {"content", "action_taken"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return self.get_report_by_id(report_id)
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f"UPDATE event_report SET {set_clause} WHERE report_id = %s",
+                        (*fields.values(), report_id),
+                    )
+                conn.commit()
+            return self.get_report_by_id(report_id)
+        except Exception as e:
+            logging.error("update_report 오류: %s", e)
+            return None

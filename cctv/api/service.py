@@ -1,22 +1,15 @@
-"""CCTV 카메라 서비스 레이어.
+"""CCTV 카메라 서비스 레이어 — MariaDB sensor + camera_info 기반."""
+from __future__ import annotations
 
-[MissingGreenlet 대응]
-AsyncSession에서 SQLAlchemy relationship을 lazy load하면
-"greenlet_spawn has not been called" 예외가 발생한다.
-모든 Sensor 반환 시점에 camera relationship이 eager load된 상태임을 보장해야 한다.
-
-→ database/crud/sensor.py 의 모든 함수가 selectinload(Sensor.camera)를 포함한
-  재조회를 수행하도록 수정되었으므로, 이 파일에서 sensor.camera 접근은 안전하다.
-"""
 import logging
-from urllib.parse import quote
+from datetime import datetime
+from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from database.crud import sensor as crud
-from database.models import Sensor, SensorType
+from database.db_handler import DatabaseHandler
 
 from .schemas import AppCameraRegisterReq, CameraCreate, CameraUpdate
 
@@ -29,11 +22,7 @@ def build_rtsp_url(
     password: str,
     rtsp_path: str | None = None,
 ) -> str:
-    """IP + 계정 정보로 RTSP URL을 생성합니다.
-
-    password에 @, :, / 같은 문자가 포함될 수 있으므로 URL encoding을 적용합니다.
-    rtsp_path 생략 시 settings.fire_pipeline_rtsp_path 사용.
-    """
+    """IP + 계정 정보로 RTSP URL을 생성한다."""
     path = rtsp_path or settings.fire_pipeline_rtsp_path
 
     if not path.startswith("/"):
@@ -45,75 +34,57 @@ def build_rtsp_url(
     return f"rtsp://{encoded_username}:{encoded_password}@{ip_address}{path}"
 
 
-async def list_cameras(
-    db: AsyncSession,
-    process_id: int | None = None,
-) -> list[Sensor]:
-    sensors = await crud.get_all(db, process_id=process_id)
-    return [s for s in sensors if s.sensor_type == SensorType.camera]
+def list_cameras(
+    db: DatabaseHandler,
+    space_id: int | None = None,
+) -> list[dict]:
+    return [_row_to_camera_out(row) for row in db.get_cctv_list(space_id=space_id)]
 
 
-async def start_registered_camera_runtime_components(
-    db: AsyncSession,
-    process_id: int | None = None,
+def start_registered_camera_runtime_components(
+    db: DatabaseHandler,
+    space_id: int | None = None,
 ) -> dict:
-    """서버 시작 시 DB에 이미 등록된 CCTV runtime 스레드를 복구한다."""
-    sensors = await list_cameras(db, process_id=process_id)
+    """서버 시작 시 MariaDB에 이미 등록된 CCTV runtime 스레드를 복구한다."""
+    rows = db.get_cctv_list(space_id=space_id)
     started = 0
-    skipped = 0
     failed = 0
     cameras = []
 
-    for sensor in sensors:
-        if not getattr(sensor, "is_active", True):
-            skipped += 1
-            cameras.append({
-                "sensor_id": sensor.id,
-                "camera_id": None,
-                "status": "skipped_inactive",
-            })
-            continue
-
-        cam = sensor.camera
-        if cam is None:
-            skipped += 1
-            cameras.append({
-                "sensor_id": sensor.id,
-                "camera_id": None,
-                "status": "skipped_no_camera_detail",
-            })
-            continue
-
+    for row in rows:
         try:
+            rtsp_url = _row_to_rtsp_url(row)
             _start_runtime_components(
-                cam_id=cam.id,
-                rtsp_url=cam.rtsp_url,
-                process_id=sensor.process_id,
+                cam_id=int(row["sen_id"]),
+                rtsp_url=rtsp_url,
+                process_id=int(row.get("space_id") or 0),
             )
             started += 1
             cameras.append({
-                "sensor_id": sensor.id,
-                "camera_id": cam.id,
+                "sensor_id": row.get("sensor_id"),
+                "sen_id": row.get("sen_id"),
+                "camera_id": row.get("sen_id"),
                 "status": "started",
             })
         except Exception as exc:
             failed += 1
             logger.warning(
-                "등록 CCTV runtime 복구 실패 sensor_id=%s cam_id=%s: %s",
-                sensor.id,
-                cam.id,
+                "등록 CCTV runtime 복구 실패 sen_id=%s sensor_id=%s: %s",
+                row.get("sen_id"),
+                row.get("sensor_id"),
                 exc,
             )
             cameras.append({
-                "sensor_id": sensor.id,
-                "camera_id": cam.id,
+                "sensor_id": row.get("sensor_id"),
+                "sen_id": row.get("sen_id"),
+                "camera_id": row.get("sen_id"),
                 "status": "failed",
                 "error": str(exc),
             })
 
     result = {
         "started": started,
-        "skipped": skipped,
+        "skipped": 0,
         "failed": failed,
         "cameras": cameras,
     }
@@ -121,34 +92,17 @@ async def start_registered_camera_runtime_components(
     return result
 
 
-async def get_camera(
-    db: AsyncSession,
+def get_camera(
+    db: DatabaseHandler,
     sensor_id: int,
-) -> Sensor:
-    """Sensor ID로 CCTV Sensor를 조회합니다. camera relationship이 eager load된 상태로 반환됩니다."""
-    sensor = await crud.get_by_id(db, sensor_id)
-
-    if not sensor or sensor.sensor_type != SensorType.camera:
+) -> dict:
+    row = db.get_cctv_by_sen_id(sensor_id)
+    if not row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Camera not found",
         )
-
-    return sensor
-
-
-def _get_camera_detail_or_400(sensor: Sensor):
-    """sensor.camera가 eager load된 상태에서만 호출해야 합니다.
-
-    crud 함수를 통해 얻은 Sensor는 항상 selectinload로 camera를 포함하므로 안전합니다.
-    """
-    if not sensor.camera:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="카메라 RTSP 정보가 없습니다.",
-        )
-
-    return sensor.camera
+    return _row_to_camera_out(row)
 
 
 def _start_runtime_components(
@@ -156,11 +110,7 @@ def _start_runtime_components(
     rtsp_url: str,
     process_id: int,
 ) -> None:
-    """카메라 등록 후 런타임 컴포넌트를 시작합니다.
-
-    실패해도 DB 등록은 이미 완료된 상태이므로 경고 로그만 남기고 예외를 전파하지 않습니다.
-    RTSP 연결 실패 / fire pipeline 모듈 미설치 모두 여기서 흡수됩니다.
-    """
+    """카메라 등록/복구 후 RTSP reader, 10초 버퍼, fire pipeline을 시작한다."""
     try:
         from cctv.rtsp import register_reader
         from cctv.buffer import start_buffer
@@ -194,10 +144,6 @@ def _start_runtime_components(
 
 
 def _stop_runtime_components(cam_id: int) -> None:
-    """카메라 삭제 시 런타임 컴포넌트를 중단합니다.
-
-    실패해도 DB 삭제는 계속 진행되도록 경고 로그만 남깁니다.
-    """
     try:
         from cctv.fire_pipeline import manager as fire_manager
         fire_manager.stop_pipeline(cam_id)
@@ -219,62 +165,41 @@ def _stop_runtime_components(cam_id: int) -> None:
         logger.warning("RTSP reader 중단 실패 (cam_id=%s)", cam_id)
 
 
-async def create_camera(
-    db: AsyncSession,
+def create_camera(
+    db: DatabaseHandler,
     data: CameraCreate,
-) -> Sensor:
-    """RTSP URL을 직접 받아 CCTV를 생성합니다.
-
-    crud.create_camera()가 selectinload 재조회로 sensor.camera를 eager load하므로
-    _get_camera_detail_or_400() 호출 시 MissingGreenlet이 발생하지 않습니다.
-    """
-    sensor_data = {
-        "device_id": data.device_id,
-        "name": data.name,
-        "process_id": data.process_id,
-    }
-
-    try:
-        sensor = await crud.create_camera(
-            db,
-            sensor_data=sensor_data,
-            rtsp_url=data.rtsp_url,
-        )
-    except Exception as exc:
-        logger.exception(
-            "Camera create failed | device_id=%s | process_id=%s",
-            data.device_id,
-            data.process_id,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"카메라 등록에 실패했습니다: {exc}",
-        ) from exc
-
-    # crud.create_camera()에서 selectinload로 eager load된 상태이므로 안전하게 접근 가능
-    cam = _get_camera_detail_or_400(sensor)
-
-    # runtime 컴포넌트 실패는 DB 등록 결과에 영향을 주지 않음
-    _start_runtime_components(
-        cam_id=cam.id,
-        rtsp_url=cam.rtsp_url,
-        process_id=data.process_id,
+) -> dict:
+    parsed = _parse_create_camera(data)
+    row = db.register_camera_info(
+        ip_address=parsed["ip_address"],
+        camera_id=parsed["camera_username"],
+        camera_pw=parsed["camera_password"],
+        rtsp_url=parsed["rtsp_url"],
+        space_id=parsed["space_id"],
+        sen_name=parsed["name"],
     )
 
-    return sensor
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="카메라 등록에 실패했습니다.",
+        )
+
+    _start_runtime_components(
+        cam_id=int(row["sen_id"]),
+        rtsp_url=parsed["rtsp_url"],
+        process_id=int(row.get("space_id") or 0),
+    )
+    row["rtsp_url"] = parsed["rtsp_url"]
+    return _row_to_camera_out(row)
 
 
-async def register_camera_from_app(
-    db: AsyncSession,
+def register_camera_from_app(
+    db: DatabaseHandler,
     data: AppCameraRegisterReq,
-) -> Sensor:
-    """앱에서 IP/PW 기반으로 CCTV를 등록합니다.
-
-    camera_username: 생략 시 "admin" (스키마 기본값)
-    name: 생략 시 "CCTV-{ip_address}" 자동 설정
-    """
+) -> dict:
+    space_id = _space_id_from_payload(data)
     camera_name = data.name or f"CCTV-{data.ip_address}"
-
     rtsp_url = build_rtsp_url(
         ip_address=data.ip_address,
         username=data.camera_username,
@@ -282,106 +207,138 @@ async def register_camera_from_app(
         rtsp_path=data.rtsp_path,
     )
 
-    camera_data = CameraCreate(
-        device_id=data.ip_address,
-        name=camera_name,
-        process_id=data.process_id,
+    row = db.register_camera_info(
+        ip_address=data.ip_address,
+        camera_id=data.camera_username,
+        camera_pw=data.camera_password,
         rtsp_url=rtsp_url,
+        space_id=space_id,
+        sen_name=camera_name,
     )
 
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="카메라 등록에 실패했습니다.",
+        )
+
     logger.info(
-        "Register CCTV from app | ip=%s | username=%s | process_id=%s | name=%s",
+        "Register CCTV from app | ip=%s | username=%s | space_id=%s | name=%s",
         data.ip_address,
         data.camera_username,
-        data.process_id,
+        space_id,
         camera_name,
     )
 
-    return await create_camera(db, camera_data)
+    _start_runtime_components(
+        cam_id=int(row["sen_id"]),
+        rtsp_url=rtsp_url,
+        process_id=int(row.get("space_id") or 0),
+    )
+    row["rtsp_url"] = rtsp_url
+    return _row_to_camera_out(row)
 
 
-async def update_camera(
-    db: AsyncSession,
+def update_camera(
+    db: DatabaseHandler,
     sensor_id: int,
     data: CameraUpdate,
-) -> Sensor:
-    """Sensor ID 기준으로 CCTV 정보를 수정합니다.
+) -> dict:
+    current = db.get_cctv_by_sen_id(sensor_id)
+    if not current:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found",
+        )
 
-    crud.update()가 내부적으로 db.refresh()를 호출하면 relationship이 expire되어
-    MissingGreenlet이 발생할 수 있다.
-    수정 후 selectinload 재조회(crud.get_by_id)를 통해 camera를 eager load한 상태로 반환한다.
-    """
-    sensor = await get_camera(db, sensor_id)
+    update_data = data.model_dump(exclude_none=True)
+    parsed_rtsp = _parse_rtsp_url(update_data["rtsp_url"]) if "rtsp_url" in update_data else {}
+    space_id = update_data.get("space_id", update_data.get("process_id"))
 
-    top_level_fields = {"name", "is_active"}
-    top_level_update = {}
-    camera_update = {}
+    row = db.update_camera_info(
+        sensor_id,
+        ip_address=update_data.get("ip_address") or parsed_rtsp.get("ip_address"),
+        camera_id=update_data.get("camera_username") or parsed_rtsp.get("camera_username"),
+        camera_pw=update_data.get("camera_password") or parsed_rtsp.get("camera_password"),
+        sen_name=update_data.get("name"),
+        is_online=update_data.get("is_active"),
+        health=update_data.get("health"),
+        space_id=space_id,
+    )
 
-    for field, value in data.model_dump(exclude_none=True).items():
-        if field in top_level_fields:
-            top_level_update[field] = value
-        else:
-            camera_update[field] = value
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="카메라 수정에 실패했습니다.",
+        )
 
-    if top_level_update:
-        for key, value in top_level_update.items():
-            setattr(sensor, key, value)
-
-    if camera_update:
-        cam = _get_camera_detail_or_400(sensor)
-        for key, value in camera_update.items():
-            setattr(cam, key, value)
-
-    await db.flush()
-
-    # flush 후 selectinload 재조회 — db.refresh()는 relationship을 expire시켜
-    # 이후 sensor.camera 접근 시 MissingGreenlet이 발생하므로 사용하지 않는다.
-    return await crud.get_by_id(db, sensor.id)
+    _stop_runtime_components(sensor_id)
+    rtsp_url = update_data.get("rtsp_url") or _row_to_rtsp_url(row, rtsp_path=update_data.get("rtsp_path"))
+    _start_runtime_components(
+        cam_id=int(row["sen_id"]),
+        rtsp_url=rtsp_url,
+        process_id=int(row.get("space_id") or 0),
+    )
+    row["rtsp_url"] = rtsp_url
+    return _row_to_camera_out(row)
 
 
-async def delete_camera(
-    db: AsyncSession,
+def delete_camera(
+    db: DatabaseHandler,
     sensor_id: int,
 ) -> None:
-    """Sensor ID 기준으로 CCTV를 삭제합니다."""
-    sensor = await get_camera(db, sensor_id)
-    cam = _get_camera_detail_or_400(sensor)
+    row = db.get_cctv_by_sen_id(sensor_id)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found",
+        )
 
-    # runtime 컴포넌트 중단 실패는 DB 삭제를 막지 않음
-    _stop_runtime_components(cam.id)
+    _stop_runtime_components(sensor_id)
 
-    await crud.delete(db, sensor)
+    if not db.delete_camera_info(sensor_id):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="카메라 삭제에 실패했습니다.",
+        )
 
 
-async def get_fire_pipeline_status(
-    db: AsyncSession,
+def get_fire_pipeline_status(
+    db: DatabaseHandler,
     sensor_id: int,
 ) -> dict:
-    """Sensor ID 기준으로 fire pipeline 상태를 조회합니다."""
-    sensor = await get_camera(db, sensor_id)
-    cam = _get_camera_detail_or_400(sensor)
+    row = db.get_cctv_by_sen_id(sensor_id)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found",
+        )
 
     try:
         from cctv.fire_pipeline import manager as fire_manager
-        status_data = fire_manager.get_status(cam.id)
+        status_data = fire_manager.get_status(sensor_id)
     except ImportError:
-        status_data = {"running": False, "latest_result": ""}
+        status_data = {"running": False, "latest_result": "", "latest_error": ""}
 
     return {
         "sensor_id": sensor_id,
-        "camera_id": cam.id,
+        "camera_id": sensor_id,
         "running": status_data.get("running", False),
         "latest_result": status_data.get("latest_result", ""),
+        "latest_error": status_data.get("latest_error", ""),
     }
 
 
-async def start_fire_pipeline(
-    db: AsyncSession,
+def start_fire_pipeline(
+    db: DatabaseHandler,
     sensor_id: int,
 ) -> dict:
-    """Sensor ID 기준으로 fire pipeline을 수동 시작합니다."""
-    sensor = await get_camera(db, sensor_id)
-    cam = _get_camera_detail_or_400(sensor)
+    row = db.get_cctv_by_sen_id(sensor_id)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found",
+        )
 
     try:
         from cctv.fire_pipeline import manager as fire_manager
@@ -391,8 +348,7 @@ async def start_fire_pipeline(
             detail="fire_pipeline 모듈이 설치되지 않았습니다.",
         )
 
-    started = fire_manager.start_pipeline(cam.id, cam.rtsp_url)
-
+    started = fire_manager.start_pipeline(sensor_id, _row_to_rtsp_url(row))
     if not started:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -402,17 +358,20 @@ async def start_fire_pipeline(
     return {
         "status": "started",
         "sensor_id": sensor_id,
-        "camera_id": cam.id,
+        "camera_id": sensor_id,
     }
 
 
-async def stop_fire_pipeline(
-    db: AsyncSession,
+def stop_fire_pipeline(
+    db: DatabaseHandler,
     sensor_id: int,
 ) -> dict:
-    """Sensor ID 기준으로 fire pipeline을 수동 중단합니다."""
-    sensor = await get_camera(db, sensor_id)
-    cam = _get_camera_detail_or_400(sensor)
+    row = db.get_cctv_by_sen_id(sensor_id)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found",
+        )
 
     try:
         from cctv.fire_pipeline import manager as fire_manager
@@ -422,8 +381,7 @@ async def stop_fire_pipeline(
             detail="fire_pipeline 모듈이 설치되지 않았습니다.",
         )
 
-    stopped = fire_manager.stop_pipeline(cam.id)
-
+    stopped = fire_manager.stop_pipeline(sensor_id)
     if not stopped:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -433,5 +391,90 @@ async def stop_fire_pipeline(
     return {
         "status": "stopped",
         "sensor_id": sensor_id,
-        "camera_id": cam.id,
+        "camera_id": sensor_id,
     }
+
+
+def _space_id_from_payload(data: Any) -> int | None:
+    space_id = getattr(data, "space_id", None)
+    if space_id is None:
+        space_id = getattr(data, "process_id", None)
+    return space_id
+
+
+def _parse_create_camera(data: CameraCreate) -> dict:
+    rtsp_url = data.rtsp_url
+    parsed = _parse_rtsp_url(rtsp_url)
+
+    ip_address = data.ip_address or data.device_id or parsed.get("ip_address")
+    camera_username = data.camera_username or parsed.get("camera_username") or "admin"
+    camera_password = data.camera_password or parsed.get("camera_password")
+
+    if not ip_address or not camera_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ip_address와 camera_password가 필요합니다.",
+        )
+
+    return {
+        "ip_address": ip_address,
+        "camera_username": camera_username,
+        "camera_password": camera_password,
+        "rtsp_url": rtsp_url,
+        "space_id": _space_id_from_payload(data),
+        "name": data.name or f"CCTV-{ip_address}",
+    }
+
+
+def _parse_rtsp_url(rtsp_url: str) -> dict:
+    parsed = urlparse(rtsp_url)
+    if parsed.scheme != "rtsp":
+        return {}
+
+    return {
+        "ip_address": parsed.hostname,
+        "camera_username": unquote(parsed.username or ""),
+        "camera_password": unquote(parsed.password or ""),
+        "rtsp_path": parsed.path or None,
+    }
+
+
+def _row_to_rtsp_url(row: dict, rtsp_path: str | None = None) -> str:
+    return build_rtsp_url(
+        ip_address=str(row["ip_address"]),
+        username=str(row["camera_id"]),
+        password=str(row["camera_pw"]),
+        rtsp_path=rtsp_path,
+    )
+
+
+def _row_to_camera_out(row: dict) -> dict:
+    rtsp_url = row.get("rtsp_url") or _row_to_rtsp_url(row)
+    registered_at = _serialize_datetime(row.get("registered_at") or row.get("created_at"))
+    is_online = bool(row.get("is_online"))
+
+    return {
+        "id": int(row["sen_id"]),
+        "sen_id": int(row["sen_id"]),
+        "sensor_id": row.get("sensor_id"),
+        "device_id": row.get("ip_address"),
+        "name": row.get("sen_name") or f"CCTV-{row.get('ip_address')}",
+        "process_id": row.get("space_id"),
+        "space_id": row.get("space_id"),
+        "space_name": row.get("space_name"),
+        "is_active": is_online,
+        "is_online": is_online,
+        "registered_at": registered_at,
+        "camera": {
+            "rtsp_url": rtsp_url,
+            "ip_address": row.get("ip_address"),
+            "camera_id": row.get("camera_id"),
+            "health": bool(row.get("health")),
+        },
+    }
+
+
+def _serialize_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    return None

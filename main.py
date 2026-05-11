@@ -278,10 +278,11 @@ async def lifespan(app: FastAPI):
     app.state.cctv_runtime_startup = None
     try:
         from cctv.api.service import start_registered_camera_runtime_components
-        from database.session import AsyncSessionLocal
 
-        async with AsyncSessionLocal() as session:
-            app.state.cctv_runtime_startup = await start_registered_camera_runtime_components(session)
+        app.state.cctv_runtime_startup = await asyncio.to_thread(
+            start_registered_camera_runtime_components,
+            db,
+        )
         logger.info("등록 CCTV runtime 복구 완료: %s", app.state.cctv_runtime_startup)
     except Exception as e:
         logger.warning("등록 CCTV runtime 복구 스킵: %s", e)
@@ -456,7 +457,7 @@ from core.sensor_registry.router import router as sensor_registry_router
 from core.map.router import router as map_router
 from core.watch_pipeline.router import router as watch_vlm_router
 from core.temperature_pipeline.router import router as temperature_vlm_router
-from core.report.router import internal_router
+from core.report.router import events_router, internal_router, reports_router
 
 app.include_router(jetson_router)
 app.include_router(sensor_registry_router)
@@ -466,6 +467,8 @@ app.include_router(temperature_vlm_router)
 app.include_router(worker_legacy_router)
 app.include_router(temp_web_router)
 app.include_router(internal_router)
+app.include_router(events_router)
+app.include_router(reports_router)
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
