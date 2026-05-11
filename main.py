@@ -296,6 +296,18 @@ async def lifespan(app: FastAPI):
         settings.api_port,
     )
 
+    # 13. 기동 후 자동 점검 — 모든 서비스가 올라온 뒤 상태를 검증한다.
+    import asyncio as _asyncio
+    from core.startup_check.checker import StartupChecker
+
+    checker = StartupChecker(app)
+    app.state.startup_checker = checker
+    # 서버가 완전히 accept 상태가 된 뒤 실행되도록 짧게 대기
+    _asyncio.get_event_loop().call_later(
+        1.5,
+        lambda: _asyncio.ensure_future(checker.run_all()),
+    )
+
     yield
 
     # ── 종료 처리 ────────────────────────────────────────────────────────────
@@ -535,6 +547,16 @@ def root():
         "ip_addr": get_real_ip(),
         "project": "Industrial Safety Monitoring",
     }
+
+
+@app.get("/health/detail", tags=["health"])
+async def health_detail(request: Request):
+    """기동 점검 결과를 반환하고, 필요 시 즉시 재점검을 실행한다."""
+    checker = getattr(request.app.state, "startup_checker", None)
+    if checker is None:
+        return {"error": "startup_checker 미초기화"}
+    await checker.run_all()
+    return checker.summary()
 
 
 @app.get("/health", tags=["health"])
