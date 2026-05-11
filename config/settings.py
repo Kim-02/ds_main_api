@@ -78,11 +78,11 @@ class Settings(BaseSettings):
     #       Dahua     : /cam/realmonitor?channel=1&subtype=0
     #       일반(기본) : /stream
     fire_pipeline_enabled: bool = True
-    fire_pipeline_yolo_model_path: str = "0507_best.pt"
+    fire_pipeline_yolo_model_path: str = "/media/ds/DATA/yolo_final/0507_best.engine"
     fire_pipeline_vllm_base_url: str = ""
     fire_pipeline_vllm_model: str = ""
     fire_pipeline_vllm_api_key: str = ""
-    fire_pipeline_rtsp_path: str = "/stream"
+    fire_pipeline_rtsp_path: str = "/stream1"
 
 
 settings = Settings()

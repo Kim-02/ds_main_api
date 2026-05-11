@@ -34,7 +34,7 @@ def build_rtsp_url(
     password에 @, :, / 같은 문자가 포함될 수 있으므로 URL encoding을 적용합니다.
     rtsp_path 생략 시 settings.fire_pipeline_rtsp_path 사용.
     """
-    path = rtsp_path or settings.fire_pipeline_rtsp_path
+    path = settings.fire_pipeline_rtsp_path
 
     if not path.startswith("/"):
         path = f"/{path}"
