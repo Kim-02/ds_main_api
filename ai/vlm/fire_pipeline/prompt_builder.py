@@ -1,12 +1,11 @@
 name_ko = {
     "fire": "화재",
     "smoke": "연기",
-    "spark": "스파크",
     "person": "사람",
     "helmet": "헬멧"
 }
 
-danger_classes = ["fire", "smoke", "spark"]
+danger_classes = ["fire", "smoke"]
 
 
 def get_name(class_name):
@@ -105,7 +104,7 @@ def make_current_state_text(summary):
 
     items = []
 
-    for class_name in ["fire", "smoke", "spark", "person"]:
+    for class_name in ["fire", "smoke", "person"]:
         if class_name not in current_state:
             continue
 

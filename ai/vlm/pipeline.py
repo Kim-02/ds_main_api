@@ -122,7 +122,11 @@ class VlmPipeline:
     def _make_detector(self):
         if self.detector_factory is not None:
             return self.detector_factory()
-        return YoloDetector(self.config.model_path)
+        return YoloDetector(
+            self.config.model_path,
+            detect_classes=self.config.detect_classes,
+            confidence=self.config.yolo_confidence,
+        )
 
     def _yolo_worker(self):
         detector = self._make_detector()

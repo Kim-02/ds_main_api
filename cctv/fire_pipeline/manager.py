@@ -61,8 +61,7 @@ def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
         from cctv.fire_pipeline.config import FirePipelineConfig
         from cctv.fire_pipeline.pipeline import ExportFinalPipeline
     except ImportError as exc:
-        # CONFLICT 주의: fire_pipeline 외부 패키지 미설치 시 ImportError 발생
-        logger.error("fire_pipeline 패키지 import 실패 — 설치 여부 확인: %s", exc)
+        logger.error("fire_pipeline import 실패 — 의존성 설치 여부 확인: %s", exc)
         return False
 
     config = FirePipelineConfig(rtsp_url=rtsp_url, model_path=model_path)

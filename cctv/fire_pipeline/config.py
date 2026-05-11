@@ -17,11 +17,13 @@ class FirePipelineConfig:
             _vllm_api_key = getattr(_s, "fire_pipeline_vllm_api_key", "") or _s.vllm_api_key
             _vllm_model = getattr(_s, "fire_pipeline_vllm_model", "") or _s.vllm_model
             _model_path = getattr(_s, "fire_pipeline_yolo_model_path", "0507_best.pt")
+            _yolo_confidence = getattr(_s, "yolo_confidence", 0.5)
         except Exception:
-            _vllm_base_url = "http://localhost:8000/v1"
-            _vllm_api_key = "token-none"
-            _vllm_model = "Qwen/Qwen2.5-VL-7B-Instruct"
-            _model_path = "0507_best.pt"
+            _vllm_base_url = "http://localhost:1111/v1"
+            _vllm_api_key = "test-key"
+            _vllm_model = "/media/ds/DATA/models/Qwen2.5-VL-3B"
+            _model_path = "0507_best.engine"
+            _yolo_confidence = 0.5
 
         self.video_source = rtsp_url
         self.model_path = model_path or _model_path
@@ -37,9 +39,11 @@ class FirePipelineConfig:
         self.frame_keep_count = self.vlm_frame_count * 2
         self.queue_size = 3
 
-        self.danger_classes = ["fire", "smoke", "spark"]
-        self.trigger_classes = ["fire", "smoke", "spark"]
+        self.detect_classes = ["person", "fire", "smoke"]
+        self.danger_classes = ["fire", "smoke"]
+        self.trigger_classes = ["fire", "smoke"]
         self.immediate_trigger_classes = ["fire", "smoke"]
+        self.yolo_confidence = _yolo_confidence
         self.abnormal_missing_limit = 4
 
         # API 통합 시 기존 파일 유지 (clean_on_start=False)

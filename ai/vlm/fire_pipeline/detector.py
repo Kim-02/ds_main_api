@@ -1,12 +1,24 @@
 from ultralytics import YOLO
 
 
-def get_yolo_data(result, frame_width, frame_height):
+def normalize_class_name(class_name):
+    return str(class_name).strip().lower()
+
+
+def get_yolo_data(result, frame_width, frame_height, detect_classes=None):
     data = []
+    allowed_classes = None
+
+    if detect_classes is not None:
+        allowed_classes = set(normalize_class_name(name) for name in detect_classes)
 
     for box in result.boxes:
         class_id = int(box.cls[0])
-        class_name = result.names[class_id]
+        class_name = normalize_class_name(result.names[class_id])
+
+        if allowed_classes is not None and class_name not in allowed_classes:
+            continue
+
         confidence = float(box.conf[0])
 
         x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -76,14 +88,46 @@ def get_count_text(detections):
 
 
 class YoloDetector:
-    def __init__(self, model_path):
+    def __init__(self, model_path, detect_classes=None, confidence=None):
         self.model = YOLO(model_path)
+        self.detect_classes = None
+        self.confidence = confidence
+        self.class_ids = None
+
+        if detect_classes is not None:
+            self.detect_classes = [normalize_class_name(name) for name in detect_classes]
+            self.class_ids = self._resolve_class_ids()
+
+    def _resolve_class_ids(self):
+        names = getattr(self.model, "names", {})
+        items = names.items() if isinstance(names, dict) else enumerate(names)
+        wanted = set(self.detect_classes or [])
+        class_ids = []
+
+        for class_id, class_name in items:
+            if normalize_class_name(class_name) in wanted:
+                class_ids.append(int(class_id))
+
+        return class_ids
 
     def detect(self, frame):
-        result = self.model(frame, verbose=False)[0]
+        kwargs = {"verbose": False}
+
+        if self.confidence is not None:
+            kwargs["conf"] = self.confidence
+
+        if self.class_ids:
+            kwargs["classes"] = self.class_ids
+
+        result = self.model(frame, **kwargs)[0]
         analyzed_frame = result.plot()
 
         frame_height, frame_width = frame.shape[:2]
-        detections = get_yolo_data(result, frame_width, frame_height)
+        detections = get_yolo_data(
+            result,
+            frame_width,
+            frame_height,
+            detect_classes=self.detect_classes,
+        )
 
         return detections, analyzed_frame

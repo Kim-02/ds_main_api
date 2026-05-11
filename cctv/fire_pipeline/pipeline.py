@@ -1,22 +1,13 @@
-"""Fire detection pipeline — export_final.pipeline 원본을 DS_MAIN_API에 맞게 적용.
-
-외부 패키지 의존성:
-  fire_pipeline 패키지 (YoloDetector, WindowNormalizer, make_compact_vlm_text,
-  RollingStorage, VideoSource)가 Python 경로에 설치되어 있어야 합니다.
-  CONFLICT 주의: ai/yolo/inference.py 의 비동기 YoloDetector와 별개로 동작합니다.
-    두 모델이 동시에 GPU 메모리를 사용하므로 메모리 부족 시 model_path를 확인하세요.
-"""
+"""Fire detection pipeline — 카메라별 CCTV YOLO/VLM 파이프라인."""
 import os
 import queue
 import threading
 
-# CONFLICT 주의: fire_pipeline 패키지가 설치된 경로를 확인하세요.
-#   pip install -e /path/to/fire_pipeline  또는 sys.path에 직접 추가 필요.
-from fire_pipeline.detector import YoloDetector, get_count_text, has_any_class
-from fire_pipeline.normalizer import WindowNormalizer
-from fire_pipeline.prompt_builder import make_compact_vlm_text
-from fire_pipeline.storage import RollingStorage
-from fire_pipeline.video_source import VideoSource
+from ai.vlm.fire_pipeline.detector import YoloDetector, get_count_text, has_any_class
+from ai.vlm.fire_pipeline.normalizer import WindowNormalizer
+from ai.vlm.fire_pipeline.prompt_builder import make_compact_vlm_text
+from ai.vlm.fire_pipeline.storage import RollingStorage
+from ai.vlm.fire_pipeline.video_source import VideoSource
 
 from cctv.fire_pipeline.analysis_vlm import SafetyAnalysisVlm
 from cctv.fire_pipeline.movement_validator import MovementValidator
@@ -151,7 +142,11 @@ class ExportFinalPipeline:
         if self.detector_factory is not None:
             return self.detector_factory()
 
-        return YoloDetector(self.config.model_path)
+        return YoloDetector(
+            self.config.model_path,
+            detect_classes=self.config.detect_classes,
+            confidence=self.config.yolo_confidence,
+        )
 
     def yolo_worker(self):
         detector = self.make_detector()

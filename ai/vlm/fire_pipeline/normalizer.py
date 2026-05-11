@@ -1,3 +1,6 @@
+from collections import deque
+
+
 def distance(a, b):
     x = a[0] - b[0]
     y = a[1] - b[1]
@@ -374,10 +377,6 @@ def make_person_danger_relation(points):
 def make_cause_clues(danger_events, person_tracks):
     clues = []
 
-    if "spark" in danger_events and "fire" in danger_events:
-        if danger_events["spark"]["first_seen"] <= danger_events["fire"]["first_seen"]:
-            clues.append("spark_before_fire")
-
     if "fire" in danger_events and "smoke" in danger_events:
         if danger_events["smoke"]["first_seen"] >= danger_events["fire"]["first_seen"]:
             clues.append("smoke_after_fire")
@@ -574,7 +573,7 @@ class WindowNormalizer:
         self.window_size = window_size
         self.keep_count = keep_count
         self.danger_classes = danger_classes
-        self.window = []
+        self.window = deque(maxlen=window_size)
         self.summaries = []
 
     def clear_window(self):
@@ -588,7 +587,7 @@ class WindowNormalizer:
         if len(self.window) == 0:
             return None
 
-        return make_summary(self.window, self.danger_classes)
+        return make_summary(list(self.window), self.danger_classes)
 
     def make_history_with_live_summary(self, completed_summary=None):
         history = list(self.summaries)
@@ -623,8 +622,7 @@ class WindowNormalizer:
         if len(self.window) < self.window_size:
             return None
 
-        summary = make_summary(self.window, self.danger_classes)
-        self.window.clear()
+        summary = make_summary(list(self.window), self.danger_classes)
 
         self.summaries.append(summary)
 

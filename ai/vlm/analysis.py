@@ -66,7 +66,6 @@ class SafetyAnalysisVlm:
             "dir": validation.get("corrected_direction", validation.get("person_direction", "unknown")),
             "fire_dir": validation.get("fire_direction", "unknown"),
             "smoke_dir": validation.get("smoke_direction", "unknown"),
-            "spark_dir": validation.get("spark_direction", "unknown"),
             "risk": validation.get("risk_level", "unknown"),
             "sit": validation.get("situation", ""),
             "why": validation.get("reason_prediction", ""),

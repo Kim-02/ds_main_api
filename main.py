@@ -3,7 +3,7 @@ import socket
 from contextlib import asynccontextmanager
 from typing import List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 
 from config import settings
 
@@ -81,6 +81,29 @@ class RealTransmission:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
+
+    # 0. VLM 서버 + YOLO 엔진 준비 확인
+    from ai.vlm.server_runtime import VllmServerManager, preload_yolo_engine
+
+    app.state.vllm_server_manager = None
+    app.state.yolo_engine_ready = False
+
+    vllm_server_manager = VllmServerManager(settings)
+
+    try:
+        logger.info("Startup step 0-1: VLM 서버 준비 확인 시작")
+        await vllm_server_manager.ensure_ready()
+        app.state.vllm_server_manager = vllm_server_manager
+        logger.info("Startup step 0-1: VLM 서버 준비 확인 완료")
+
+        logger.info("Startup step 0-2: YOLO 엔진 preload 시작")
+        await preload_yolo_engine(settings)
+        app.state.yolo_engine_ready = True
+        logger.info("Startup step 0-2: YOLO 엔진 preload 완료")
+    except Exception:
+        logger.exception("VLM/YOLO startup preflight 실패")
+        vllm_server_manager.stop()
+        raise
 
     # 1. MariaDB 핸들러
     from database.db_handler import DatabaseHandler
@@ -250,6 +273,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Jetson mDNS 방송 종료 중 오류: %s", e)
 
+    try:
+        if app.state.vllm_server_manager is not None:
+            app.state.vllm_server_manager.stop()
+    except Exception as e:
+        logger.warning("VLM 서버 종료 중 오류: %s", e)
+
     logger.info("서버 종료 완료")
 
 
@@ -415,9 +444,23 @@ def root():
 
 
 @app.get("/health", tags=["health"])
-def health():
+def health(request: Request):
+    vllm_manager = getattr(request.app.state, "vllm_server_manager", None)
+    yolo_engine_ready = getattr(request.app.state, "yolo_engine_ready", False)
+    vllm_status = None
+    vllm_ready = False
+    vllm_detail = "manager_not_started"
+
+    if vllm_manager is not None:
+        vllm_status = vllm_manager.status()
+        vllm_ready, vllm_detail = vllm_manager.check_ready_once()
+
     return {
         "status": "ok",
+        "yolo_engine_ready": yolo_engine_ready,
+        "vllm_ready": vllm_ready,
+        "vllm_detail": vllm_detail,
+        "vllm": vllm_status,
     }
 
 

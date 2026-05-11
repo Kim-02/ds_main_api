@@ -23,10 +23,12 @@ class VlmPipelineConfig:
         self.frame_keep_count = self.vlm_frame_count * 2
         self.queue_size = 3
 
-        # 감지 클래스
-        self.danger_classes = ["fire", "smoke", "spark"]
-        self.trigger_classes = ["fire", "smoke", "spark"]
+        # YOLO는 person/fire/smoke만 사용하고, 위험 판단은 fire/smoke만 사용
+        self.detect_classes = ["person", "fire", "smoke"]
+        self.danger_classes = ["fire", "smoke"]
+        self.trigger_classes = ["fire", "smoke"]
         self.immediate_trigger_classes = ["fire", "smoke"]
+        self.yolo_confidence = settings.yolo_confidence
         self.abnormal_missing_limit = 4
 
         # 기타

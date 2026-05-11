@@ -17,19 +17,37 @@ class Settings(BaseSettings):
     mqtt_sensor_data_topics: list = ["sensor/+/+", "sensors/+/data"]
 
     # vLLM
-    vllm_base_url: str = "http://localhost:8000/v1"
-    vllm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
-    vllm_api_key: str = "token-none"
+    vllm_base_url: str = "http://localhost:1111/v1"
+    vllm_model: str = "/media/ds/DATA/models/Qwen2.5-VL-3B"
+    vllm_api_key: str = "test-key"
+    vllm_autostart: bool = True
+    vllm_venv_activate: str = "~/vllm-jetson-v092-torch27/bin/activate"
+    vllm_workdir: str = "~/vllm-0.9.2-src"
+    vllm_serve_model_path: str = "/media/ds/DATA/models/Qwen2.5-VL-3B"
+    vllm_host: str = "0.0.0.0"
+    vllm_port: int = 1111
+    vllm_dtype: str = "float16"
+    vllm_gpu_memory_utilization: float = 0.5
+    vllm_max_model_len: int = 4096
+    vllm_max_num_seqs: int = 3
+    vllm_max_num_batched_tokens: int = 4096
+    vllm_limit_mm_per_prompt: str = "image=1,video=0"
+    vllm_startup_timeout_seconds: int = 600
+    vllm_startup_poll_seconds: float = 3.0
+    vllm_log_path: str = "logs/vllm_server.log"
 
     # Camera / YOLO
     frame_buffer_minutes: int = 10
-    yolo_model_path: str = "yolov8n.pt"
+    frame_buffer_seconds: int = 10
+    yolo_model_path: str = "0507_best.engine"
     yolo_confidence: float = 0.5
+    yolo_preload_on_startup: bool = True
+    yolo_warmup_on_startup: bool = True
     cctv_rtsp_url: str = ""
 
     # Fire pipeline (CCTV 화재 감지 전용)
     fire_pipeline_enabled: bool = True
-    fire_pipeline_yolo_model_path: str = "0507_best.pt"
+    fire_pipeline_yolo_model_path: str = "0507_best.engine"
     fire_pipeline_vllm_base_url: str = ""
     fire_pipeline_vllm_model: str = ""
     fire_pipeline_vllm_api_key: str = ""

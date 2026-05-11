@@ -98,14 +98,17 @@ def _start_runtime_components(
         from cctv.buffer import start_buffer
 
         register_reader(cam_id, rtsp_url)
-        start_buffer(cam_id, process_id)
+        start_buffer(
+            cam_id,
+            process_id,
+            buffer_seconds=settings.frame_buffer_seconds,
+        )
     except Exception:
         logger.warning(
             "RTSP reader/buffer 시작 실패 (cam_id=%s, rtsp=%s) — DB 등록은 유지됩니다.",
             cam_id,
             rtsp_url,
         )
-        return  # runtime 실패가 등록 전체를 롤백하지 않도록 반환
 
     if settings.fire_pipeline_enabled:
         try:
