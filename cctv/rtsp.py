@@ -98,7 +98,10 @@ class RtspReader:
             cap = None
 
             try:
-                cap = cv2.VideoCapture(self.rtsp_url)
+                if str(self.rtsp_url).startswith("rtsp://"):
+                    cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                else:
+                    cap = cv2.VideoCapture(self.rtsp_url)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
                 if not cap.isOpened():

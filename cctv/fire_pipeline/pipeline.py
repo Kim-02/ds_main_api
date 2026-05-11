@@ -1,6 +1,7 @@
 """Fire detection pipeline — 카메라별 CCTV YOLO/VLM 파이프라인."""
 import os
 import queue
+import logging
 import threading
 import time
 
@@ -12,6 +13,8 @@ from ai.vlm.fire_pipeline.video_source import VideoSource
 
 from cctv.fire_pipeline.analysis_vlm import SafetyAnalysisVlm
 from cctv.fire_pipeline.movement_validator import MovementValidator
+
+logger = logging.getLogger(__name__)
 
 
 def put_latest(item_queue, item):
@@ -100,6 +103,11 @@ class ExportFinalPipeline:
         if getattr(self.config, "camera_id", None) is not None:
             if self.run_buffer_capture_loop():
                 return
+            logger.warning(
+                "[FirePipeline] frame buffer unavailable, direct video fallback camera_id=%s source=%s",
+                self.config.camera_id,
+                self.config.video_source,
+            )
 
         video = VideoSource(self.config.video_source)
 
@@ -143,6 +151,7 @@ class ExportFinalPipeline:
         started_at = time.monotonic()
         origin_timestamp = None
         last_timestamp = 0.0
+        last_empty_log_time = 0.0
         next_sample_time = 0.0
         frame_number = 1
 
@@ -154,13 +163,20 @@ class ExportFinalPipeline:
                 seconds=max(self.config.sample_gap * 3, self.config.buffer_recent_seconds)
             )
             if not frames:
-                status = get_buffer_status(camera_id)
+                current_monotonic = time.monotonic()
                 if (
-                    time.monotonic() - started_at >= startup_wait
-                    and int(status.get("frame_count") or 0) == 0
+                    current_monotonic - started_at >= startup_wait
+                    and current_monotonic - last_empty_log_time
+                    >= self.config.buffer_wait_log_interval_seconds
                 ):
-                    self.log_status("[BUFFER] 버퍼 프레임 없음, RTSP로 전환:", status)
-                    return False
+                    status = get_buffer_status(camera_id)
+                    logger.warning(
+                        "[FirePipeline] waiting for frame buffer camera_id=%s source=%s status=%s",
+                        camera_id,
+                        self.config.video_source,
+                        status,
+                    )
+                    last_empty_log_time = current_monotonic
 
                 time.sleep(self.config.buffer_empty_sleep_seconds)
                 continue

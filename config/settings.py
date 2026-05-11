@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     fire_pipeline_buffer_recent_seconds: float = 1.5
     fire_pipeline_buffer_empty_sleep_seconds: float = 0.1
     fire_pipeline_buffer_duplicate_sleep_seconds: float = 0.05
+    fire_pipeline_buffer_wait_log_interval_seconds: float = 30.0
     fire_pipeline_normalized_keep_count: int = 3
     fire_pipeline_queue_size: int = 3
     fire_pipeline_abnormal_missing_limit: int = 4

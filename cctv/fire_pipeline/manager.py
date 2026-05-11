@@ -51,6 +51,17 @@ def _make_on_result(camera_id: int) -> Callable[[str], None]:
     return on_result
 
 
+def _run_pipeline(camera_id: int, pipeline) -> None:
+    try:
+        pipeline.start()
+    except Exception as exc:
+        with _pipelines_lock:
+            entry = _pipelines.get(camera_id)
+            if entry is not None:
+                entry["latest_error"] = repr(exc)
+        logger.exception("Fire pipeline crashed for camera %s", camera_id)
+
+
 def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
     """카메라 ID에 대한 fire pipeline 시작.
 
@@ -66,6 +77,7 @@ def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
             "thread": None,
             "pipeline": None,
             "latest_result": "",
+            "latest_error": "",
             "starting": True,
         }
 
@@ -85,7 +97,8 @@ def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
         pipeline = ExportFinalPipeline(config, on_result=on_result)
 
         thread = threading.Thread(
-            target=pipeline.start,
+            target=_run_pipeline,
+            args=(camera_id, pipeline),
             daemon=True,
             name=f"fire-pipeline-cam{camera_id}",
         )
@@ -101,6 +114,7 @@ def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
             "thread": thread,
             "pipeline": pipeline,
             "latest_result": "",
+            "latest_error": "",
             "starting": False,
         }
     logger.info("Fire pipeline started for camera %s (rtsp=%s)", camera_id, rtsp_url)
@@ -136,6 +150,7 @@ def get_status(camera_id: int) -> dict:
         "running": bool(thread and thread.is_alive()),
         "starting": bool(entry.get("starting")),
         "latest_result": entry["latest_result"],
+        "latest_error": entry.get("latest_error", ""),
     }
 
 

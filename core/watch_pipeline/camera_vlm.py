@@ -372,7 +372,10 @@ class WatchCameraVlmSession:
                 "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
             )
 
-        cap = cv2.VideoCapture(rtsp_url)
+        if rtsp_url.startswith("rtsp://"):
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        else:
+            cap = cv2.VideoCapture(rtsp_url)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
             cap.release()

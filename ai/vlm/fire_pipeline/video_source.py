@@ -16,7 +16,10 @@ class VideoSource:
         if self.is_live_source():
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
 
-        self.cap = cv2.VideoCapture(self.source)
+        if self.is_live_source():
+            self.cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+        else:
+            self.cap = cv2.VideoCapture(self.source)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.start_time = time.monotonic()
         return self.cap.isOpened()

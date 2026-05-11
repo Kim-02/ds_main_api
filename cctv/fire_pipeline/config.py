@@ -24,6 +24,7 @@ class FirePipelineConfig:
             _buffer_recent_seconds = getattr(_s, "fire_pipeline_buffer_recent_seconds", 1.5)
             _buffer_empty_sleep_seconds = getattr(_s, "fire_pipeline_buffer_empty_sleep_seconds", 0.1)
             _buffer_duplicate_sleep_seconds = getattr(_s, "fire_pipeline_buffer_duplicate_sleep_seconds", 0.05)
+            _buffer_wait_log_interval_seconds = getattr(_s, "fire_pipeline_buffer_wait_log_interval_seconds", 30.0)
             _normalized_keep_count = getattr(_s, "fire_pipeline_normalized_keep_count", 3)
             _queue_size = getattr(_s, "fire_pipeline_queue_size", 3)
             _abnormal_missing_limit = getattr(_s, "fire_pipeline_abnormal_missing_limit", 4)
@@ -45,6 +46,7 @@ class FirePipelineConfig:
             _buffer_recent_seconds = 1.5
             _buffer_empty_sleep_seconds = 0.1
             _buffer_duplicate_sleep_seconds = 0.05
+            _buffer_wait_log_interval_seconds = 30.0
             _normalized_keep_count = 3
             _queue_size = 3
             _abnormal_missing_limit = 4
@@ -68,6 +70,7 @@ class FirePipelineConfig:
         self.buffer_recent_seconds = float(_buffer_recent_seconds)
         self.buffer_empty_sleep_seconds = float(_buffer_empty_sleep_seconds)
         self.buffer_duplicate_sleep_seconds = float(_buffer_duplicate_sleep_seconds)
+        self.buffer_wait_log_interval_seconds = float(_buffer_wait_log_interval_seconds)
         self.vlm_gap = float(_vlm_gap)
         self.vlm_frame_count = int(self.vlm_gap / self.sample_gap)
         self.normalized_keep_count = int(_normalized_keep_count)
