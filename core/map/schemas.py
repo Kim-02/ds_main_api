@@ -6,3 +6,4 @@ class SensorPositionSaveReq(BaseModel):
     sensor_id: str
     x_ratio: float
     y_ratio: float
+
