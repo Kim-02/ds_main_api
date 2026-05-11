@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     vllm_startup_timeout_seconds: int = 600
     vllm_startup_poll_seconds: float = 3.0
     vllm_log_path: str = "logs/vllm_server.log"
+    vllm_progress_path: str = "logs/vllm_startup_progress.json"
 
     # Camera / YOLO
     frame_buffer_minutes: int = 10
