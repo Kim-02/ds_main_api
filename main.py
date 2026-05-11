@@ -84,6 +84,7 @@ async def lifespan(app: FastAPI):
 
     # 0. VLM 서버 + YOLO 엔진 준비 확인
     from ai.vlm.server_runtime import VllmServerManager, preload_yolo_engine
+    from ai.vlm.yolo_runtime import ensure_tensorrt_available
 
     app.state.vllm_server_manager = None
     app.state.yolo_engine_ready = False
@@ -91,6 +92,11 @@ async def lifespan(app: FastAPI):
     vllm_server_manager = VllmServerManager(settings)
 
     try:
+        if settings.yolo_preload_on_startup:
+            logger.info("Startup step 0-0: YOLO 런타임 사전 확인 시작")
+            await asyncio.to_thread(ensure_tensorrt_available, settings.fire_pipeline_yolo_model_path)
+            logger.info("Startup step 0-0: YOLO 런타임 사전 확인 완료")
+
         logger.info("Startup step 0-1: VLM 서버 준비 확인 시작")
         await vllm_server_manager.ensure_ready()
         app.state.vllm_server_manager = vllm_server_manager

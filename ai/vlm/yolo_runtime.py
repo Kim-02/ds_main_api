@@ -67,7 +67,48 @@ def ensure_tensorrt_available(model_path: str) -> str | None:
         version,
         getattr(tensorrt, "__file__", "unknown"),
     )
+    ensure_torch_cuda_available(model_path)
     return version
+
+
+def ensure_torch_cuda_available(model_path: str) -> dict | None:
+    """Check that the active PyTorch build can use CUDA for TensorRT engines."""
+    if not str(model_path).lower().endswith(".engine"):
+        return None
+
+    configure_ultralytics_runtime()
+
+    try:
+        torch = importlib.import_module("torch")
+    except Exception as exc:
+        raise RuntimeError(
+            "YOLO TensorRT engine(.engine)을 로드하려면 torch가 필요합니다. "
+            "Jetson CUDA가 포함된 PyTorch를 먼저 설치하세요."
+        ) from exc
+
+    info = {
+        "version": str(getattr(torch, "__version__", "unknown")),
+        "cuda_version": str(getattr(getattr(torch, "version", None), "cuda", None)),
+        "cuda_available": bool(torch.cuda.is_available()),
+        "module": str(getattr(torch, "__file__", "unknown")),
+    }
+
+    if info["cuda_version"] in {"None", "", "unknown"} or not info["cuda_available"]:
+        raise RuntimeError(
+            "현재 API venv의 torch는 CUDA를 사용할 수 없습니다. "
+            f"torch_version={info['version']} torch_cuda={info['cuda_version']} "
+            f"cuda_available={info['cuda_available']} module={info['module']}. "
+            "0507_best.engine 같은 TensorRT YOLO 엔진은 PyPI CPU torch로 실행할 수 없습니다. "
+            "Jetson CUDA용 PyTorch를 설치하거나 CUDA torch가 들어있는 venv로 API를 실행하세요."
+        )
+
+    logger.info(
+        "[YOLO_RUNTIME] Torch CUDA ready version=%s torch_cuda=%s module=%s",
+        info["version"],
+        info["cuda_version"],
+        info["module"],
+    )
+    return info
 
 
 def _jetson_system_package_paths() -> list[Path]:
