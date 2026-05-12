@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     fire_pipeline_vllm_base_url: str = ""
     fire_pipeline_vllm_model: str = ""
     fire_pipeline_vllm_api_key: str = ""
-    fire_pipeline_rtsp_path: str = "/stream"
+    fire_pipeline_rtsp_path: str = "/stream1"
     fire_pipeline_sample_gap_seconds: float = 0.5
     fire_pipeline_vlm_gap_seconds: float = 10.0
     fire_pipeline_buffer_startup_wait_seconds: float = 5.0
