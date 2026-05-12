@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import time
 from typing import Any
@@ -294,22 +296,49 @@ class VllmServerManager:
 
     def stop(self) -> None:
         if not self.started_by_manager or self.process is None:
+            logger.info(
+                "[VLLM] stop skipped started_by_manager=%s has_process=%s",
+                self.started_by_manager,
+                self.process is not None,
+            )
             self._close_log()
             return
 
         if self.process.poll() is None:
-            logger.info("[VLLM] stopping pid=%s", self.process.pid)
-            self.process.terminate()
+            logger.info("[VLLM] stopping process group pid=%s", self.process.pid)
+            self._terminate_process_group(signal.SIGTERM)
 
             try:
                 self.process.wait(timeout=20)
             except subprocess.TimeoutExpired:
-                logger.warning("[VLLM] terminate timeout, killing pid=%s", self.process.pid)
-                self.process.kill()
+                logger.warning("[VLLM] terminate timeout, killing process group pid=%s", self.process.pid)
+                self._terminate_process_group(signal.SIGKILL)
                 self.process.wait(timeout=10)
 
         self._close_log()
         logger.info("[VLLM] stopped status=%s", self.status())
+
+    def _terminate_process_group(self, sig: signal.Signals) -> None:
+        if self.process is None:
+            return
+
+        try:
+            pgid = os.getpgid(self.process.pid)
+            os.killpg(pgid, sig)
+            logger.info("[VLLM] sent %s to pgid=%s pid=%s", sig.name, pgid, self.process.pid)
+        except ProcessLookupError:
+            logger.info("[VLLM] process already gone pid=%s", self.process.pid)
+        except Exception:
+            logger.warning(
+                "[VLLM] process group signal failed, fallback to process signal pid=%s sig=%s",
+                self.process.pid,
+                sig.name,
+                exc_info=True,
+            )
+            if sig == signal.SIGTERM:
+                self.process.terminate()
+            else:
+                self.process.kill()
 
     def _close_log(self) -> None:
         if self._log_handle is not None:
