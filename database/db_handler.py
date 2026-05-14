@@ -66,6 +66,394 @@ class DatabaseHandler:
     # Jetson 관리
     # ------------------------------------------------------------------
 
+    def get_all_jetsons(self) -> list[dict]:
+        """Jetson 전체 목록 조회 (space_name 포함)."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            j.jetson_id,
+                            j.jetson_wp,
+                            j.jetson_loc,
+                            j.jetson_status,
+                            j.ip_addr,
+                            j.port,
+                            j.space_id,
+                            sp.space_name,
+                            j.created_at,
+                            j.updated_at
+                        FROM jetson j
+                        LEFT JOIN ds_space sp ON j.space_id = sp.space_id
+                        ORDER BY j.jetson_id
+                        """
+                    )
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_all_jetsons 오류: %s", e)
+            return []
+
+    def get_jetson_by_id(self, jetson_id: int) -> Optional[dict]:
+        """jetson_id 기준 단건 조회 (space_name 포함)."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            j.jetson_id,
+                            j.jetson_wp,
+                            j.jetson_loc,
+                            j.jetson_status,
+                            j.ip_addr,
+                            j.port,
+                            j.space_id,
+                            sp.space_name,
+                            j.created_at,
+                            j.updated_at
+                        FROM jetson j
+                        LEFT JOIN ds_space sp ON j.space_id = sp.space_id
+                        WHERE j.jetson_id = %s
+                        LIMIT 1
+                        """,
+                        (jetson_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_jetson_by_id 오류: %s", e)
+            return None
+
+    def get_camera_sen_ids_by_jetson_id(self, jetson_id: int) -> list:
+        """jetson_id에 연결된 카메라 센서의 sen_id 목록 반환 (runtime stop용)."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT sen_id FROM sensor
+                        WHERE jetson_id = %s
+                          AND sensor_type IN ('camera', 'cctv')
+                        """,
+                        (jetson_id,),
+                    )
+                    return [row["sen_id"] for row in cursor.fetchall()]
+        except Exception as e:
+            logging.error("get_camera_sen_ids_by_jetson_id 오류: %s", e)
+            return []
+
+    def delete_jetson_cascade(self, jetson_id: int) -> bool:
+        """Jetson + 연결된 camera_info + sensor 전체 삭제 (순서 보장)."""
+        try:
+            with self._get_connection() as conn:
+                try:
+                    with conn.cursor() as cursor:
+                        conn.begin()
+                        cursor.execute(
+                            """
+                            DELETE ci FROM camera_info ci
+                            JOIN sensor s ON ci.sen_id = s.sen_id
+                            WHERE s.jetson_id = %s
+                            """,
+                            (jetson_id,),
+                        )
+                        cursor.execute(
+                            "DELETE FROM sensor WHERE jetson_id = %s",
+                            (jetson_id,),
+                        )
+                        cursor.execute(
+                            "DELETE FROM jetson WHERE jetson_id = %s",
+                            (jetson_id,),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            return True
+        except Exception as e:
+            logging.error("delete_jetson_cascade 오류: %s", e)
+            return False
+
+    def upsert_jetson(self, data: dict) -> tuple:
+        """
+        ip_addr + port 기준으로 Jetson을 찾아 없으면 INSERT, 있으면 UPDATE.
+        Returns: (row, is_new: bool)
+        """
+        ip_addr = data.get("ip_addr")
+        port = data.get("port", 8080)
+        space_id = data.get("space_id")
+
+        if not ip_addr:
+            raise ValueError("ip_addr는 필수입니다.")
+        if space_id is None:
+            raise ValueError("space_id는 필수입니다.")
+
+        try:
+            with self._get_connection() as conn:
+                try:
+                    with conn.cursor() as cursor:
+                        conn.begin()
+
+                        cursor.execute(
+                            "SELECT space_id FROM ds_space WHERE space_id = %s LIMIT 1",
+                            (space_id,),
+                        )
+                        if not cursor.fetchone():
+                            raise ValueError(f"존재하지 않는 space_id입니다: {space_id}")
+
+                        cursor.execute(
+                            "SELECT jetson_id FROM jetson WHERE ip_addr = %s AND port = %s LIMIT 1",
+                            (ip_addr, port),
+                        )
+                        existing = cursor.fetchone()
+
+                        if existing:
+                            jetson_id = existing["jetson_id"]
+                            cursor.execute(
+                                """
+                                UPDATE jetson
+                                SET
+                                    jetson_wp = %s,
+                                    jetson_loc = %s,
+                                    jetson_status = %s,
+                                    space_id = %s,
+                                    updated_at = NOW()
+                                WHERE jetson_id = %s
+                                """,
+                                (
+                                    data.get("jetson_wp", "Jetson"),
+                                    data.get("jetson_loc", ""),
+                                    1 if data.get("jetson_status", True) else 0,
+                                    space_id,
+                                    jetson_id,
+                                ),
+                            )
+                            cursor.execute(
+                                "UPDATE sensor SET space_id = %s, updated_at = NOW() WHERE jetson_id = %s",
+                                (space_id, jetson_id),
+                            )
+                            cursor.execute(
+                                """
+                                UPDATE camera_info ci
+                                JOIN sensor s ON ci.sen_id = s.sen_id
+                                SET ci.space_id = %s
+                                WHERE s.jetson_id = %s
+                                """,
+                                (space_id, jetson_id),
+                            )
+                            is_new = False
+                        else:
+                            cursor.execute(
+                                """
+                                INSERT INTO jetson (
+                                    jetson_wp, jetson_loc, jetson_status,
+                                    ip_addr, port, space_id
+                                ) VALUES (%s, %s, %s, %s, %s, %s)
+                                """,
+                                (
+                                    data.get("jetson_wp", "Jetson"),
+                                    data.get("jetson_loc", ""),
+                                    1 if data.get("jetson_status", True) else 0,
+                                    ip_addr,
+                                    port,
+                                    space_id,
+                                ),
+                            )
+                            jetson_id = cursor.lastrowid
+                            is_new = True
+
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            return self.get_jetson_by_id(jetson_id), is_new
+
+        except ValueError:
+            raise
+        except Exception as e:
+            logging.error("upsert_jetson 오류: %s", e)
+            return None, False
+
+    def deactivate_jetson(self, jetson_id: int) -> bool:
+        """
+        Jetson 비활성화 (등록 해제).
+        jetson_status = 0, 연결된 sensor.is_online = 0.
+        이력 보존을 위해 space_id는 유지한다.
+        """
+        try:
+            with self._get_connection() as conn:
+                try:
+                    with conn.cursor() as cursor:
+                        conn.begin()
+                        cursor.execute(
+                            "UPDATE jetson SET jetson_status = 0, updated_at = NOW() WHERE jetson_id = %s",
+                            (jetson_id,),
+                        )
+                        cursor.execute(
+                            "UPDATE sensor SET is_online = 0, updated_at = NOW() WHERE jetson_id = %s",
+                            (jetson_id,),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            return True
+        except Exception as e:
+            logging.error("deactivate_jetson 오류: %s", e)
+            return False
+
+    def create_jetson(self, data: dict) -> Optional[dict]:
+        """Jetson 신규 등록. space_id가 전달되면 ds_space 존재 여부를 검증한다."""
+        space_id = data.get("space_id")
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if space_id is not None:
+                        cursor.execute(
+                            "SELECT space_id FROM ds_space WHERE space_id = %s LIMIT 1",
+                            (space_id,),
+                        )
+                        if not cursor.fetchone():
+                            raise ValueError(f"존재하지 않는 space_id입니다: {space_id}")
+
+                    cursor.execute(
+                        """
+                        INSERT INTO jetson (
+                            jetson_wp,
+                            jetson_loc,
+                            jetson_status,
+                            ip_addr,
+                            port,
+                            space_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            data.get("jetson_wp", "default_workplace"),
+                            data.get("jetson_loc", "default_location"),
+                            1 if data.get("jetson_status", True) else 0,
+                            data.get("ip_addr"),
+                            data.get("port", 8080),
+                            space_id,
+                        ),
+                    )
+                    new_id = cursor.lastrowid
+                conn.commit()
+            return self.get_jetson_by_id(new_id)
+        except ValueError:
+            raise
+        except Exception as e:
+            logging.error("create_jetson 오류: %s", e)
+            return None
+
+    def update_jetson(self, jetson_id: int, data: dict) -> Optional[dict]:
+        """
+        Jetson 정보 수정.
+        space_id가 변경되면 해당 Jetson에 속한 sensor와 camera_info의 space_id도 동기화한다.
+        """
+        space_id = data.get("space_id")
+        try:
+            with self._get_connection() as conn:
+                try:
+                    with conn.cursor() as cursor:
+                        conn.begin()
+
+                        if space_id is not None:
+                            cursor.execute(
+                                "SELECT space_id FROM ds_space WHERE space_id = %s LIMIT 1",
+                                (space_id,),
+                            )
+                            if not cursor.fetchone():
+                                raise ValueError(f"존재하지 않는 space_id입니다: {space_id}")
+
+                        sets, params = [], []
+                        for col in ("jetson_wp", "jetson_loc", "ip_addr", "port"):
+                            if col in data and data[col] is not None:
+                                sets.append(f"{col} = %s")
+                                params.append(data[col])
+                        if "jetson_status" in data:
+                            sets.append("jetson_status = %s")
+                            params.append(1 if data["jetson_status"] else 0)
+                        if space_id is not None:
+                            sets.append("space_id = %s")
+                            params.append(space_id)
+
+                        if sets:
+                            params.append(jetson_id)
+                            cursor.execute(
+                                f"UPDATE jetson SET {', '.join(sets)} WHERE jetson_id = %s",
+                                tuple(params),
+                            )
+
+                        # space_id 변경 시 연결된 sensor와 camera_info도 동기화
+                        if space_id is not None:
+                            cursor.execute(
+                                """
+                                UPDATE sensor
+                                SET space_id = %s, updated_at = NOW()
+                                WHERE jetson_id = %s
+                                """,
+                                (space_id, jetson_id),
+                            )
+                            cursor.execute(
+                                """
+                                UPDATE camera_info ci
+                                JOIN sensor s ON ci.sen_id = s.sen_id
+                                SET ci.space_id = %s
+                                WHERE s.jetson_id = %s
+                                """,
+                                (space_id, jetson_id),
+                            )
+
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            return self.get_jetson_by_id(jetson_id)
+        except ValueError:
+            raise
+        except Exception as e:
+            logging.error("update_jetson 오류: %s", e)
+            return None
+
+    def get_cameras_by_danger_sensor_id(self, sensor_id: str) -> list[dict]:
+        """
+        위험 센서의 sensor_id 기준으로 같은 space_id에 속한 카메라 목록을 반환한다.
+        VLM 분석 요청 대상 CCTV를 찾을 때 사용한다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            ci.sen_id,
+                            ci.ip_address,
+                            ci.camera_id,
+                            ci.camera_pw,
+                            ci.health,
+                            ci.space_id,
+                            s.sensor_id,
+                            s.sen_name,
+                            s.sensor_type,
+                            s.jetson_id
+                        FROM sensor danger_sensor
+                        JOIN camera_info ci
+                          ON ci.space_id = danger_sensor.space_id
+                        JOIN sensor s
+                          ON ci.sen_id = s.sen_id
+                        WHERE danger_sensor.sensor_id = %s
+                          AND danger_sensor.space_id IS NOT NULL
+                          AND s.sensor_type IN ('camera', 'cctv')
+                        """,
+                        (sensor_id,),
+                    )
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_cameras_by_danger_sensor_id 오류: %s", e)
+            return []
+
     def init_jetson_info(self, jetson_data: dict) -> bool:
         """
         Jetson이 DB에 없으면 1개 생성하고,
@@ -211,28 +599,30 @@ class DatabaseHandler:
 
     def get_registered_sensor_rows(self) -> list[dict]:
         """
-        register_date 제거 버전.
+        register_date 제거 버전. space_name 포함.
         """
         query = """
             SELECT
-                sen_id,
-                sensor_id,
-                jetson_id,
-                sensor_type,
-                sen_name,
-                sen_locate,
-                model,
-                mqtt_topic,
-                mdns_hostname,
-                ip_addr,
-                space_id,
-                is_online,
-                last_seen_at,
-                registered_at,
-                created_at,
-                updated_at
-            FROM sensor
-            ORDER BY updated_at DESC
+                s.sen_id,
+                s.sensor_id,
+                s.jetson_id,
+                s.sensor_type,
+                s.sen_name,
+                s.sen_locate,
+                s.model,
+                s.mqtt_topic,
+                s.mdns_hostname,
+                s.ip_addr,
+                s.space_id,
+                sp.space_name,
+                s.is_online,
+                s.last_seen_at,
+                s.registered_at,
+                s.created_at,
+                s.updated_at
+            FROM sensor s
+            LEFT JOIN ds_space sp ON s.space_id = sp.space_id
+            ORDER BY s.updated_at DESC
         """
         try:
             with self._get_connection() as conn:
@@ -314,7 +704,7 @@ class DatabaseHandler:
     def register_discovered_sensors(self, jetson_id: int, sensors: list) -> bool:
         """
         mDNS로 발견된 센서를 DB에 등록한다.
-        기존 register_date 컬럼은 사용하지 않는다.
+        jetson.space_id가 NULL이면 ValueError를 발생시킨다.
 
         주의:
         - 워치-근로자 매핑은 이 함수가 아니라 register_sensor_with_worker()에서 처리한다.
@@ -335,11 +725,12 @@ class DatabaseHandler:
                 last_seen_at,
                 registered_at,
                 created_at,
-                updated_at
+                updated_at,
+                space_id
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
-                %s, NOW(), NOW(), NOW()
+                %s, NOW(), NOW(), NOW(), %s
             )
             ON DUPLICATE KEY UPDATE
                 jetson_id = VALUES(jetson_id),
@@ -352,12 +743,25 @@ class DatabaseHandler:
                 ip_addr = VALUES(ip_addr),
                 is_online = VALUES(is_online),
                 last_seen_at = VALUES(last_seen_at),
+                space_id = VALUES(space_id),
                 updated_at = NOW()
         """
 
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
+                    # jetson의 space_id를 먼저 조회
+                    cursor.execute(
+                        "SELECT space_id FROM jetson WHERE jetson_id = %s LIMIT 1",
+                        (jetson_id,),
+                    )
+                    jetson_row = cursor.fetchone()
+                    if not jetson_row:
+                        raise ValueError(f"존재하지 않는 Jetson입니다. jetson_id={jetson_id}")
+                    space_id = jetson_row["space_id"]
+                    if space_id is None:
+                        raise ValueError("Jetson에 공간이 매핑되어 있지 않아 센서를 등록할 수 없습니다.")
+
                     for s in sensors:
                         d = s.model_dump() if hasattr(s, "model_dump") else s
 
@@ -389,12 +793,15 @@ class DatabaseHandler:
                                 d.get("ip_addr"),
                                 1 if d.get("is_online", True) else 0,
                                 self._parse_to_mysql_time(d.get("last_seen_at")),
+                                space_id,
                             ),
                         )
 
                 conn.commit()
             return True
 
+        except ValueError:
+            raise
         except Exception as e:
             logging.exception("register_discovered_sensors 오류: %s", e)
             return False
@@ -435,6 +842,18 @@ class DatabaseHandler:
                 try:
                     with conn.cursor() as cursor:
                         conn.begin()
+
+                        # 0. Jetson의 space_id 조회
+                        cursor.execute(
+                            "SELECT space_id FROM jetson WHERE jetson_id = %s LIMIT 1",
+                            (jetson_id,),
+                        )
+                        jetson_row = cursor.fetchone()
+                        if not jetson_row:
+                            raise ValueError(f"존재하지 않는 Jetson입니다. jetson_id={jetson_id}")
+                        space_id = jetson_row["space_id"]
+                        if space_id is None:
+                            raise ValueError("Jetson에 공간이 매핑되어 있지 않아 센서를 등록할 수 없습니다.")
 
                         # 1. 작업자 확인
                         cursor.execute(
@@ -509,6 +928,7 @@ class DatabaseHandler:
                                     ip_addr = %s,
                                     is_online = %s,
                                     last_seen_at = %s,
+                                    space_id = %s,
                                     registered_at = COALESCE(registered_at, NOW()),
                                     updated_at = NOW()
                                 WHERE sen_id = %s
@@ -524,6 +944,7 @@ class DatabaseHandler:
                                     sensor_info.get("ip_addr"),
                                     1 if sensor_info.get("is_online", True) else 0,
                                     self._parse_to_mysql_time(sensor_info.get("last_seen_at")),
+                                    space_id,
                                     sen_id,
                                 ),
                             )
@@ -545,11 +966,12 @@ class DatabaseHandler:
                                     last_seen_at,
                                     registered_at,
                                     created_at,
-                                    updated_at
+                                    updated_at,
+                                    space_id
                                 ) VALUES (
                                     %s, %s, %s, %s, %s,
                                     %s, %s, %s, %s, %s,
-                                    %s, NOW(), NOW(), NOW()
+                                    %s, NOW(), NOW(), NOW(), %s
                                 )
                                 """,
                                 (
@@ -564,6 +986,7 @@ class DatabaseHandler:
                                     sensor_info.get("ip_addr"),
                                     1 if sensor_info.get("is_online", True) else 0,
                                     self._parse_to_mysql_time(sensor_info.get("last_seen_at")),
+                                    space_id,
                                 ),
                             )
                             sen_id = cursor.lastrowid
@@ -920,7 +1343,7 @@ class DatabaseHandler:
 
                         cursor.execute(
                             """
-                            SELECT jetson_id, jetson_loc
+                            SELECT jetson_id, jetson_loc, space_id
                             FROM jetson
                             ORDER BY jetson_id
                             LIMIT 1
@@ -929,6 +1352,10 @@ class DatabaseHandler:
                         jetson = cursor.fetchone()
                         if not jetson:
                             raise ValueError("등록된 Jetson 정보가 없습니다.")
+
+                        # space_id 미전달 시 Jetson의 space_id로 대체
+                        if space_id is None:
+                            space_id = jetson.get("space_id")
 
                         auto_name = sen_name or f"CAM_{ip_address.split('.')[-1]}"
                         auto_loc = sen_locate or jetson["jetson_loc"]
@@ -1481,6 +1908,145 @@ class DatabaseHandler:
     # 플로어 맵 / 센서 위치
     # ------------------------------------------------------------------
 
+    def get_floor_map_by_space_id(self, space_id: int) -> Optional[dict]:
+        """space_id 기준 가장 최근 평면도 1개 반환."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            fm.map_id,
+                            fm.jetson_id,
+                            fm.space_id,
+                            sp.space_name,
+                            fm.map_name,
+                            fm.image_base64,
+                            fm.image_mime_type,
+                            fm.image_width,
+                            fm.image_height,
+                            fm.created_at,
+                            fm.updated_at
+                        FROM floor_map fm
+                        LEFT JOIN ds_space sp ON fm.space_id = sp.space_id
+                        WHERE fm.space_id = %s
+                        ORDER BY fm.updated_at DESC
+                        LIMIT 1
+                        """,
+                        (space_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_floor_map_by_space_id 오류: %s", e)
+            return None
+
+    def validate_sensor_map_space(self, map_id: int, sensor_id: str) -> Optional[str]:
+        """map_id와 sensor_id의 space_id가 일치하는지 검증.
+        일치하면 None 반환, 불일치하면 에러 메시지 반환."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT space_id FROM floor_map WHERE map_id = %s LIMIT 1",
+                        (map_id,),
+                    )
+                    map_row = cursor.fetchone()
+                    if not map_row:
+                        return f"map_id={map_id} 평면도가 없습니다."
+
+                    cursor.execute(
+                        "SELECT space_id FROM sensor WHERE sensor_id = %s LIMIT 1",
+                        (sensor_id,),
+                    )
+                    sensor_row = cursor.fetchone()
+                    if not sensor_row:
+                        return f"sensor_id='{sensor_id}' 센서가 없습니다."
+
+                    map_space = map_row["space_id"]
+                    sensor_space = sensor_row["space_id"]
+
+                    if map_space is None or sensor_space is None:
+                        return "평면도 또는 센서에 공간(space_id) 정보가 없습니다."
+
+                    if map_space != sensor_space:
+                        return "센서와 평면도의 space_id가 일치하지 않습니다."
+
+                    return None
+        except Exception as e:
+            logging.error("validate_sensor_map_space 오류: %s", e)
+            return "공간 검증 중 오류가 발생했습니다."
+
+    def get_registered_sensors_by_space_id(
+        self,
+        space_id: int,
+        map_id: Optional[int] = None,
+    ) -> list[dict]:
+        """space_id 기준 온습도 센서 목록 반환.
+
+        map_id 전달 시 해당 map에 이미 배치된 센서에 placed=1 반환.
+        """
+        TH_TYPES = ("temp_humidity", "temperature_humidity", "th", "temperature")
+        placeholders = ", ".join(["%s"] * len(TH_TYPES))
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if map_id is not None:
+                        cursor.execute(
+                            f"""
+                            SELECT
+                                s.sensor_id,
+                                s.sensor_type,
+                                s.sen_name,
+                                s.sen_locate,
+                                s.model,
+                                s.mqtt_topic,
+                                s.is_online,
+                                s.space_id,
+                                sp.space_name,
+                                CASE WHEN p.position_id IS NOT NULL THEN 1 ELSE 0 END AS placed,
+                                p.x_ratio,
+                                p.y_ratio
+                            FROM sensor s
+                            LEFT JOIN ds_space sp ON s.space_id = sp.space_id
+                            LEFT JOIN sensor_map_position p
+                              ON s.sensor_id = p.sensor_id
+                             AND p.map_id = %s
+                            WHERE s.space_id = %s
+                              AND s.sensor_type IN ({placeholders})
+                            ORDER BY s.sen_name
+                            """,
+                            (map_id, space_id, *TH_TYPES),
+                        )
+                    else:
+                        cursor.execute(
+                            f"""
+                            SELECT
+                                s.sensor_id,
+                                s.sensor_type,
+                                s.sen_name,
+                                s.sen_locate,
+                                s.model,
+                                s.mqtt_topic,
+                                s.is_online,
+                                s.space_id,
+                                sp.space_name,
+                                0 AS placed,
+                                NULL AS x_ratio,
+                                NULL AS y_ratio
+                            FROM sensor s
+                            LEFT JOIN ds_space sp ON s.space_id = sp.space_id
+                            WHERE s.space_id = %s
+                              AND s.sensor_type IN ({placeholders})
+                            ORDER BY s.sen_name
+                            """,
+                            (space_id, *TH_TYPES),
+                        )
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_registered_sensors_by_space_id 오류: %s", e)
+            return []
+
     def get_floor_map_by_jetson_id(self, jetson_id: int):
         """jetson_id 기준 가장 최근 평면도 1개 반환."""
         try:
@@ -1512,17 +2078,18 @@ class DatabaseHandler:
             return None
 
     def get_floor_map_by_map_id(self, map_id: int):
-        """map_id 기준 평면도 1개 반환 (존재 여부 확인용)."""
+        """map_id 기준 평면도 1개 반환 (존재 여부 확인용). space_id, space_name 포함."""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT map_id, jetson_id, map_name,
-                               image_mime_type, image_width, image_height,
-                               created_at, updated_at
-                        FROM floor_map
-                        WHERE map_id = %s
+                        SELECT fm.map_id, fm.jetson_id, fm.space_id, sp.space_name,
+                               fm.map_name, fm.image_mime_type, fm.image_width,
+                               fm.image_height, fm.created_at, fm.updated_at
+                        FROM floor_map fm
+                        LEFT JOIN ds_space sp ON fm.space_id = sp.space_id
+                        WHERE fm.map_id = %s
                         LIMIT 1
                         """,
                         (map_id,),
@@ -1549,16 +2116,34 @@ class DatabaseHandler:
                             s.sensor_type,
                             s.sen_locate,
                             s.model,
-                            s.is_online
+                            s.is_online,
+                            latest.temp   AS latest_temp,
+                            latest.humid  AS latest_humidity,
+                            latest.time   AS latest_measured_at
                         FROM sensor_map_position p
-                        JOIN sensor s
-                          ON p.sensor_id = s.sensor_id
+                        JOIN sensor s ON p.sensor_id = s.sensor_id
+                        LEFT JOIN (
+                            SELECT t.sen_id, t.temp, t.humid, t.time
+                            FROM th_trans t
+                            INNER JOIN (
+                                SELECT sen_id, MAX(time) AS max_time
+                                FROM th_trans
+                                GROUP BY sen_id
+                            ) latest_t ON t.sen_id = latest_t.sen_id
+                                      AND t.time = latest_t.max_time
+                        ) latest ON s.sen_id = latest.sen_id
                         WHERE p.map_id = %s
                         ORDER BY s.sen_name
                         """,
                         (map_id,),
                     )
-                    return cursor.fetchall()
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        if row.get("latest_measured_at") is not None:
+                            val = row["latest_measured_at"]
+                            if hasattr(val, "isoformat"):
+                                row["latest_measured_at"] = val.isoformat()
+                    return rows
 
         except Exception as e:
             logging.error("get_sensor_positions_by_map_id 오류: %s", e)
@@ -1819,6 +2404,225 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("get_web_sensor_hb 오류: %s", e)
             return []
+
+    # ------------------------------------------------------------------
+    # 대시보드 요약
+    # ------------------------------------------------------------------
+
+    def get_recent_alerts_by_space_id(self, space_id: int, limit: int = 20) -> list[dict]:
+        """space_id 기준 최근 이벤트/알림 조회. event 테이블과 sensor JOIN."""
+        limit = min(max(1, limit), 100)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            e.event_id,
+                            s.space_id,
+                            COALESCE(ec.ev_code_name, 'VLM 알림') AS title,
+                            COALESCE(e.message, '') AS message,
+                            'danger' AS level,
+                            'vlm' AS source,
+                            s.sen_name AS camera_name,
+                            e.time AS created_at,
+                            CASE WHEN e.status IS NOT NULL AND e.status != 'open' THEN 1 ELSE 0 END AS is_read
+                        FROM event e
+                        LEFT JOIN sensor s ON e.sen_id = s.sen_id
+                        LEFT JOIN event_code ec ON e.ev_code_id = ec.ev_code_id
+                        WHERE s.space_id = %s
+                        ORDER BY e.time DESC
+                        LIMIT %s
+                        """,
+                        (space_id, limit),
+                    )
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        if row.get("created_at") and hasattr(row["created_at"], "strftime"):
+                            row["created_at"] = row["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+                    return rows
+        except Exception as e:
+            logging.error("get_recent_alerts_by_space_id 오류: %s", e)
+            return []
+
+    def get_dashboard_sensors_by_space_id(self, space_id: int) -> list[dict]:
+        """space_id 기준 센서 목록 (camera/cctv/rtsp 계열 제외)."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            s.sen_id,
+                            s.sensor_id,
+                            s.sensor_type,
+                            s.sen_name,
+                            s.sen_locate,
+                            s.model,
+                            s.mqtt_topic,
+                            s.is_online,
+                            s.last_seen_at,
+                            s.space_id
+                        FROM sensor s
+                        WHERE s.space_id = %s
+                          AND LOWER(s.sensor_type) NOT LIKE '%%camera%%'
+                          AND LOWER(s.sensor_type) NOT LIKE '%%cctv%%'
+                          AND LOWER(s.sensor_type) NOT LIKE '%%rtsp%%'
+                        ORDER BY s.sen_name
+                        """,
+                        (space_id,),
+                    )
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        if row.get("last_seen_at") and hasattr(row["last_seen_at"], "strftime"):
+                            row["last_seen_at"] = row["last_seen_at"].strftime("%Y-%m-%d %H:%M:%S")
+                    return rows
+        except Exception as e:
+            logging.error("get_dashboard_sensors_by_space_id 오류: %s", e)
+            return []
+
+    def get_dashboard_cctvs_by_space_id(self, space_id: int) -> list[dict]:
+        """space_id 기준 CCTV 목록 (camera_info + sensor JOIN)."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            ci.sen_id,
+                            ci.ip_address,
+                            ci.camera_id,
+                            ci.health,
+                            COALESCE(ci.space_id, s.space_id) AS space_id,
+                            s.sen_name,
+                            s.sensor_id,
+                            s.is_online
+                        FROM camera_info ci
+                        LEFT JOIN sensor s ON ci.sen_id = s.sen_id
+                        WHERE COALESCE(ci.space_id, s.space_id) = %s
+                        ORDER BY s.sen_name
+                        """,
+                        (space_id,),
+                    )
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_dashboard_cctvs_by_space_id 오류: %s", e)
+            return []
+
+    def get_dashboard_workers_by_space_id(self, space_id: int) -> list[dict]:
+        """worker.sen_id -> sensor.sen_id -> sensor.space_id 기준 작업자 목록.
+        worker 테이블에 space_id가 없으므로 센서 매핑 기준으로 집계."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            w.dept_id,
+                            w.name,
+                            w.is_manager,
+                            w.sen_id,
+                            s.sensor_id,
+                            s.sen_name AS sensor_name,
+                            s.sensor_type,
+                            s.space_id
+                        FROM worker w
+                        JOIN sensor s ON w.sen_id = s.sen_id
+                        WHERE s.space_id = %s
+                          AND w.is_manager = 0
+                        ORDER BY w.name
+                        """,
+                        (space_id,),
+                    )
+                    return cursor.fetchall()
+        except Exception as e:
+            logging.error("get_dashboard_workers_by_space_id 오류: %s", e)
+            return []
+
+    def get_dashboard_summary_by_space_id(self, space_id: int) -> Optional[dict]:
+        """space_id 기준 대시보드 요약 데이터를 반환한다."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 공간 정보
+                    cursor.execute(
+                        "SELECT space_id, space_name FROM ds_space WHERE space_id = %s LIMIT 1",
+                        (space_id,),
+                    )
+                    space = cursor.fetchone()
+
+                    # 활성 Jetson 정보 (가장 최근 등록 기준)
+                    cursor.execute(
+                        """
+                        SELECT jetson_id, jetson_wp
+                        FROM jetson
+                        WHERE space_id = %s AND jetson_status = 1
+                        ORDER BY jetson_id DESC
+                        LIMIT 1
+                        """,
+                        (space_id,),
+                    )
+                    jetson = cursor.fetchone()
+
+                    # 센서 수 (camera/cctv/rtsp 계열 제외)
+                    # 주의: pymysql cursor.execute()에서 SQL LIKE의 %는 %%로 이스케이프 필요
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) AS cnt FROM sensor
+                        WHERE space_id = %s
+                          AND LOWER(sensor_type) NOT LIKE '%%camera%%'
+                          AND LOWER(sensor_type) NOT LIKE '%%cctv%%'
+                          AND LOWER(sensor_type) NOT LIKE '%%rtsp%%'
+                        """,
+                        (space_id,),
+                    )
+                    sensor_total = cursor.fetchone()["cnt"]
+
+                    # CCTV 수 — camera_info.space_id 우선, NULL이면 sensor.space_id로 보완
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM camera_info ci
+                        LEFT JOIN sensor s ON ci.sen_id = s.sen_id
+                        WHERE COALESCE(ci.space_id, s.space_id) = %s
+                        """,
+                        (space_id,),
+                    )
+                    cctv_total = cursor.fetchone()["cnt"]
+
+                    # 작업자 수 — worker 테이블에 space_id가 없으므로
+                    # worker.sen_id -> sensor.sen_id -> sensor.space_id 기준으로 집계
+                    # sen_id가 NULL인 작업자(미배정)는 해당 공간 카운트에서 제외
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM worker w
+                        JOIN sensor s ON w.sen_id = s.sen_id
+                        WHERE s.space_id = %s
+                          AND w.is_manager = 0
+                        """,
+                        (space_id,),
+                    )
+                    worker_total = cursor.fetchone()["cnt"]
+
+                    # TODO: event 테이블과 sensor.space_id JOIN으로 미확인 위험 알림 수 계산 필요
+                    # 현재는 0 반환
+                    danger_alert_count = 0
+
+                    return {
+                        "space_id": space_id,
+                        "space_name": space["space_name"] if space else None,
+                        "jetson_id": jetson["jetson_id"] if jetson else None,
+                        "jetson_name": jetson["jetson_wp"] if jetson else None,
+                        "danger_alert_count": danger_alert_count,
+                        "sensor_total": sensor_total,
+                        "cctv_total": cctv_total,
+                        "worker_total": worker_total,
+                    }
+
+        except Exception as e:
+            logging.error("get_dashboard_summary_by_space_id 오류: %s", e)
+            return None
 
     # ------------------------------------------------------------------
     # ds_space (공정/구역) CRUD
@@ -2268,3 +3072,4 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("update_report 오류: %s", e)
             return None
+

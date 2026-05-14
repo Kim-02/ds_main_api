@@ -34,6 +34,16 @@ def build_rtsp_url(
     return f"rtsp://{encoded_username}:{encoded_password}@{ip_address}{path}"
 
 
+def _validate_camera_reachable(ip_address: str, timeout: float = 3.0) -> bool:
+    """IP 주소의 RTSP 포트(554)로 소켓 접속이 가능한지 확인한다."""
+    import socket
+    try:
+        with socket.create_connection((ip_address, 554), timeout=timeout):
+            return True
+    except (socket.timeout, socket.error, OSError):
+        return False
+
+
 def list_cameras(
     db: DatabaseHandler,
     space_id: int | None = None,
@@ -198,6 +208,13 @@ def register_camera_from_app(
     db: DatabaseHandler,
     data: AppCameraRegisterReq,
 ) -> dict:
+    # DB insert 전 카메라 네트워크 연결 검증
+    if not _validate_camera_reachable(data.ip_address):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="CCTV 연결 실패: IP, ID, 비밀번호 또는 RTSP 경로를 확인해주세요.",
+        )
+
     space_id = _space_id_from_payload(data)
     camera_name = data.name or f"CCTV-{data.ip_address}"
     rtsp_url = build_rtsp_url(
@@ -478,3 +495,4 @@ def _serialize_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     return None
+

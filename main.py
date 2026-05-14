@@ -449,13 +449,18 @@ from fastapi import APIRouter
 
 api = APIRouter(prefix="/api/v1")
 
-from process.router import router as process_router
+from process.router import router as process_router, spaces_router
 from worker.router import router as worker_router
 from cctv.api.scenario import router as scenario_router
 from temperature.api.router import router as temperature_router, web_router as temp_web_router
 from cctv.api.router import router as cctv_router
+from core.jetson.router import router_v1 as jetson_v1_router
+from dashboard.router import router as dashboard_router
 
 api.include_router(process_router)
+api.include_router(spaces_router)
+api.include_router(jetson_v1_router)
+api.include_router(dashboard_router)
 api.include_router(worker_router)
 api.include_router(temperature_router)
 api.include_router(cctv_router)
@@ -600,3 +605,4 @@ if __name__ == "__main__":
         port=settings.api_port,
         reload=settings.debug,
     )
+
