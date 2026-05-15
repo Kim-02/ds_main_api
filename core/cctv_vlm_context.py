@@ -236,11 +236,30 @@ def _save_context_frame(camera: dict, frame: Any, *, source: str, index: int) ->
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     prefix = f"cctv_vlm_cam_{camera_key}_"
     frame_path = folder / f"{prefix}{source_key}_{timestamp}_{index:03d}.jpg"
-    if not cv2.imwrite(str(frame_path), frame):
+    write_frame = _resize_for_vlm(frame)
+    if not cv2.imwrite(str(frame_path), write_frame):
         raise RuntimeError(f"YOLO context frame write failed: {frame_path}")
 
     _prune_context_frames(folder, prefix)
     return str(frame_path)
+
+
+def _resize_for_vlm(frame: Any) -> Any:
+    import cv2
+
+    max_side = int(getattr(settings, "cctv_vlm_request_image_max_side", 512) or 512)
+    if max_side <= 0:
+        return frame
+
+    height, width = frame.shape[:2]
+    current_max = max(width, height)
+    if current_max <= max_side:
+        return frame
+
+    scale = max_side / float(current_max)
+    resized_width = max(1, int(width * scale))
+    resized_height = max(1, int(height * scale))
+    return cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
 
 
 def _prune_context_frames(folder: Path, prefix: str) -> None:

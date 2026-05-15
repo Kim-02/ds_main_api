@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     cctv_vlm_yolo_context_max_frames: int = 20
     cctv_vlm_yolo_context_frame_dir: str = "cctv_vlm_yolo_frames"
     cctv_vlm_yolo_context_saved_frames_keep_count: int = 240
-    cctv_vlm_yolo_context_prompt_max_chars: int = 2600
+    cctv_vlm_yolo_context_prompt_max_chars: int = 420
+    cctv_vlm_request_image_max_side: int = 512
 
     # Fire pipeline (CCTV 화재 감지 전용)
     fire_pipeline_enabled: bool = True
@@ -87,7 +88,9 @@ class Settings(BaseSettings):
     watch_camera_vlm_session_seconds: int = 120
     watch_camera_vlm_analysis_interval_seconds: int = 30
     camera_vlm_request_timeout_seconds: int = 30
-    camera_vlm_prompt_max_chars: int = 6000
+    camera_vlm_prompt_max_chars: int = 1800
+    camera_vlm_retry_prompt_max_chars: int = 900
+    camera_vlm_max_tokens: int = 256
     rest_forced_rest_work_minutes: int = 120
     rest_default_age: int = 40
     rest_default_gender: int = 1

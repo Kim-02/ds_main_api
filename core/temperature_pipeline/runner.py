@@ -496,29 +496,23 @@ def run_temperature_camera_vlm_once(
 
 def _build_temperature_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
     hazard_context = _build_hazard_context(camera, trigger)
-    trigger_json = _limit_text(_json_dumps(trigger), 1200)
-    hazard_json = _limit_text(_json_dumps(hazard_context), 700)
+    trigger_json = _limit_text(_json_dumps(trigger), 260)
+    hazard_json = _limit_text(_json_dumps(hazard_context), 180)
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
-        + "이벤트별 목적: 온도/습도 센서가 고온을 감지한 공간에서 관리자 모니터링을 돕는 것입니다.\n"
-        "유의관리지역 여부와 유의물을 반드시 반영하세요.\n"
-        "유의관리지역이면 hazard_type의 위험물/유의물을 명시하고, 현재 화면 기준 안전한 대피 경로와 피해야 할 방향을 함께 경고하세요.\n"
-        "유의관리지역이 아니면 hazard_warning은 none으로 두되, 화면에 보이는 fire/smoke/heat_source 위험은 별도로 경고하세요.\n"
-        "현재 CCTV 화면을 보고 작업장 상태를 JSON 하나로만 답하세요.\n"
-        "온도 센서가 고온을 감지한 공간의 관리자 모니터링 보조가 목적입니다.\n"
-        "사람의 이동 방향, 행동, 밀집, 회피, 쓰러짐, 위험 원인 단서를 중점적으로 보세요.\n"
-        "불확실한 내용은 추측하지 말고 unknown 또는 빈 배열로 표시하세요.\n"
-        "응답 형식:\n"
+        + "목적: 고온 감지 공간의 작업자 이동/행동/위험을 관리자에게 짧게 알립니다.\n"
+        "유의관리지역이면 hazard_type 위험물을 명시하고 안전한 대피 경로를 경고하세요. 불확실하면 unknown.\n"
+        "JSON 하나만 답하세요:\n"
         "{"
-        "\"summary\":\"현재 작업장 상태 한 문장\","
+        "\"summary\":\"한 문장\","
         "\"risk_level\":\"low|medium|high|unknown\","
         "\"visible_people\":\"none|one|multiple|unknown\","
         "\"person_actions\":[\"working\",\"moving\",\"leaving\",\"fallen\",\"helping\",\"unknown\"],"
         "\"movement\":\"none|toward_risk|away_from_risk|random|unknown\","
         "\"visible_risks\":[\"fire\",\"smoke\",\"heat_source\",\"steam\",\"crowding\",\"none\"],"
-        "\"evacuation_route\":\"현재 화면 기준 대피 경로 또는 unknown\","
-        "\"hazard_warning\":\"유의물/위험물 경고 또는 none\","
-        "\"recommended_action\":\"관리자가 확인할 조치 한 문장\""
+        "\"evacuation_route\":\"대피 경로 또는 unknown\","
+        "\"hazard_warning\":\"위험물 경고 또는 none\","
+        "\"recommended_action\":\"조치 한 문장\""
         "}\n"
         f"유의관리지역={hazard_json}\n"
         f"온도이벤트={trigger_json}"

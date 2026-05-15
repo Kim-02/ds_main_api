@@ -452,14 +452,36 @@ class WatchCameraVlmSession:
         frame_path = str(yolo_context.get("image_path") or "")
         prompt = _call_prompt_builder(self.prompt_builder, self.camera, self._last_trigger, yolo_context)
         prompt = _limit_prompt_for_vlm(prompt)
+        max_tokens = int(getattr(settings, "camera_vlm_max_tokens", 256) or 256)
         logger.info(
-            "[WatchCameraVLM] autoregressive VLM request camera_sen_id=%s event_type=%s frame=%s yolo_context=%s",
+            "[WatchCameraVLM] autoregressive VLM request camera_sen_id=%s event_type=%s frame=%s prompt_chars=%s max_tokens=%s yolo_context=%s",
             self.camera.get("sen_id"),
             self.event_type,
             frame_path,
+            len(prompt),
+            max_tokens,
             public_yolo_context(yolo_context),
         )
-        text = client.request_text(prompt, frame_path, max_tokens=512, temperature=0.2, stream=False)
+        try:
+            text = client.request_text(prompt, frame_path, max_tokens=max_tokens, temperature=0.2, stream=False)
+        except Exception as exc:
+            if not _is_prompt_too_long_error(exc):
+                raise
+            retry_prompt = _build_retry_prompt(self.camera, self._last_trigger, yolo_context)
+            logger.warning(
+                "[WatchCameraVLM] prompt too long, retry with compact prompt camera_sen_id=%s original_chars=%s retry_chars=%s error=%s",
+                self.camera.get("sen_id"),
+                len(prompt),
+                len(retry_prompt),
+                exc,
+            )
+            text = client.request_text(
+                retry_prompt,
+                frame_path,
+                max_tokens=min(max_tokens, 192),
+                temperature=0.2,
+                stream=False,
+            )
         logger.info(
             "[VLM TEXT] event_type=%s camera_sen_id=%s text=%s",
             self.event_type,
@@ -500,20 +522,15 @@ def _build_rtsp_url(camera: dict) -> str:
 
 def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | None) -> str:
     return (
-        "분석 명칭: autoregressive VLM.\n"
-        "공통 CCTV 분석 계층:\n"
-        "1. 최근 10초 CCTV 프레임을 YOLO(person, fire, smoke)로 분석하고 저장합니다.\n"
-        "2. 저장된 프레임의 YOLO 결과를 정규화 텍스트로 요약합니다.\n"
-        "3. 이벤트가 발생하면 현재 첨부 이미지와 YOLO 정규화 텍스트를 함께 보고 판단합니다.\n"
-        "현재 이미지가 최우선 근거이며, 정규화 텍스트는 사람 이동/위험 객체 흐름 보정에만 사용하세요.\n"
-        "현재 이미지에 보이지 않는 사람이나 객체를 확정적으로 말하지 마세요.\n"
-        f"카메라={json.dumps(_public_camera(camera), ensure_ascii=False, default=str)}\n"
+        "분석: autoregressive VLM. 현재 CCTV 이미지가 최우선, YOLO 10초 정규화는 이동/위험 흐름 보조입니다.\n"
+        "현재 이미지에 안 보이는 사람/객체를 확정하지 마세요.\n"
+        f"카메라={json.dumps(_compact_camera_for_prompt(camera), ensure_ascii=False, default=str)}\n"
         f"{_format_yolo_context_for_prompt(yolo_context)}\n"
     )
 
 
 def _build_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
-    trigger_json = json.dumps(trigger, ensure_ascii=False)
+    trigger_json = _limit_text(json.dumps(trigger, ensure_ascii=False, default=str), 500)
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "이벤트별 목적: 휴식 권고가 발생한 작업자와 같은 공간의 작업장 상태 확인입니다.\n"
@@ -551,7 +568,15 @@ def _format_yolo_context_for_prompt(yolo_context: dict | None) -> str:
     if not yolo_context:
         return "YOLO정규화메타={}\nYOLO정규화텍스트=\n[YOLO compact history]\nmissing"
 
-    metadata = public_yolo_context(yolo_context)
+    public = public_yolo_context(yolo_context)
+    metadata = {
+        "source": public.get("source"),
+        "camera_id": public.get("camera_id"),
+        "frame_count": public.get("frame_count"),
+        "sampled_count": public.get("sampled_count"),
+        "generated_at": public.get("generated_at"),
+        "normalized_text_length": public.get("normalized_text_length"),
+    }
     text = str(yolo_context.get("normalized_text") or "")
     max_chars = int(getattr(settings, "cctv_vlm_yolo_context_prompt_max_chars", 2600) or 2600)
     return (
@@ -581,6 +606,37 @@ def _limit_prompt_for_vlm(prompt: str) -> str:
     return _limit_text(prompt, max_chars)
 
 
+def _build_retry_prompt(camera: dict, trigger: dict, yolo_context: dict) -> str:
+    max_chars = int(getattr(settings, "camera_vlm_retry_prompt_max_chars", 900) or 900)
+    camera_text = json.dumps(_compact_camera_for_prompt(camera), ensure_ascii=False, default=str)
+    trigger_text = _limit_text(json.dumps(trigger, ensure_ascii=False, default=str), 260)
+    yolo_text = _limit_text(str(yolo_context.get("normalized_text") or ""), 360)
+    prompt = (
+        "분석 명칭: autoregressive VLM.\n"
+        "현재 CCTV 이미지가 최우선입니다. YOLO 이력은 보조 근거입니다.\n"
+        "JSON 하나만 답하세요: "
+        "{\"summary\":\"한 문장\",\"risk_level\":\"low|medium|high|unknown\","
+        "\"visible_people\":\"none|one|multiple|unknown\","
+        "\"visible_risks\":[\"fire\",\"smoke\",\"heat_source\",\"none\"],"
+        "\"evacuation_route\":\"대피 경로 또는 unknown\","
+        "\"hazard_warning\":\"위험물 경고 또는 none\","
+        "\"recommended_action\":\"조치 한 문장\"}\n"
+        f"카메라={camera_text}\n"
+        f"이벤트={trigger_text}\n"
+        f"YOLO={yolo_text}"
+    )
+    return _limit_text(prompt, max_chars)
+
+
+def _is_prompt_too_long_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "maximum model length" in text
+        or "decoder prompt" in text
+        or "prompt" in text and "longer" in text
+    )
+
+
 def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -589,6 +645,16 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return False
+
+
+def _compact_camera_for_prompt(camera: dict) -> dict:
+    return {
+        "sen_id": camera.get("sen_id"),
+        "space_id": camera.get("space_id"),
+        "space_name": camera.get("space_name"),
+        "hazard_type": camera.get("hazard_type"),
+        "is_hazard": _as_bool(camera.get("is_hazard")),
+    }
 
 
 def _public_camera(camera: dict) -> dict:
