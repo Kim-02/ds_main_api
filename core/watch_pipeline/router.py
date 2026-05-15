@@ -11,7 +11,7 @@ def _get_manager(request: Request):
     return manager
 
 
-@router.get("/sessions", summary="워치 연동 카메라 VLM 세션 전체 조회")
+@router.get("/sessions", summary="워치 연동 카메라 autoregressive VLM 세션 전체 조회")
 def get_watch_camera_vlm_sessions(request: Request):
     manager = _get_manager(request)
     return {"status": "success", "data": manager.get_status()}

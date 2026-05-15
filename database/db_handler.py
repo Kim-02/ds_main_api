@@ -615,6 +615,8 @@ class DatabaseHandler:
                 s.ip_addr,
                 s.space_id,
                 sp.space_name,
+                sp.hazard_type,
+                sp.is_hazard,
                 s.is_online,
                 s.last_seen_at,
                 s.registered_at,
@@ -647,7 +649,9 @@ class DatabaseHandler:
                             s.sensor_type,
                             s.sen_name,
                             s.space_id,
-                            sp.space_name
+                            sp.space_name,
+                            sp.hazard_type,
+                            sp.is_hazard
                         FROM sensor s
                         LEFT JOIN ds_space sp
                           ON s.space_id = sp.space_id
@@ -679,6 +683,8 @@ class DatabaseHandler:
                             s.sen_locate,
                             COALESCE(c.space_id, s.space_id) AS space_id,
                             sp.space_name,
+                            sp.hazard_type,
+                            sp.is_hazard,
                             s.is_online,
                             c.ip_address,
                             c.camera_id,
@@ -1459,7 +1465,9 @@ class DatabaseHandler:
                             s.created_at,
                             s.updated_at,
                             COALESCE(c.space_id, s.space_id) AS space_id,
-                            sp.space_name
+                            sp.space_name,
+                            sp.hazard_type,
+                            sp.is_hazard
                         FROM camera_info c
                         JOIN sensor s
                           ON c.sen_id = s.sen_id
@@ -1496,7 +1504,9 @@ class DatabaseHandler:
                             s.created_at,
                             s.updated_at,
                             COALESCE(c.space_id, s.space_id) AS space_id,
-                            sp.space_name
+                            sp.space_name,
+                            sp.hazard_type,
+                            sp.is_hazard
                         FROM camera_info c
                         JOIN sensor s
                           ON c.sen_id = s.sen_id
@@ -2546,7 +2556,12 @@ class DatabaseHandler:
                 with conn.cursor() as cursor:
                     # 공간 정보
                     cursor.execute(
-                        "SELECT space_id, space_name FROM ds_space WHERE space_id = %s LIMIT 1",
+                        """
+                        SELECT space_id, space_name, hazard_type, is_hazard
+                        FROM ds_space
+                        WHERE space_id = %s
+                        LIMIT 1
+                        """,
                         (space_id,),
                     )
                     space = cursor.fetchone()
@@ -2632,7 +2647,13 @@ class DatabaseHandler:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT space_id, space_name FROM ds_space ORDER BY space_id")
+                    cursor.execute(
+                        """
+                        SELECT space_id, space_name, hazard_type, is_hazard
+                        FROM ds_space
+                        ORDER BY space_id
+                        """
+                    )
                     return cursor.fetchall()
         except Exception as e:
             logging.error("get_all_spaces 오류: %s", e)
@@ -2643,7 +2664,7 @@ class DatabaseHandler:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "SELECT space_id, space_name FROM ds_space WHERE space_id = %s",
+                        "SELECT space_id, space_name, hazard_type, is_hazard FROM ds_space WHERE space_id = %s",
                         (space_id,),
                     )
                     return cursor.fetchone()
@@ -3072,4 +3093,3 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("update_report 오류: %s", e)
             return None
-

@@ -1,1 +1,1 @@
-"""Temperature-triggered CCTV VLM monitoring pipeline."""
+"""Temperature-triggered CCTV autoregressive VLM monitoring pipeline."""

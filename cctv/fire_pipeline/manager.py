@@ -41,7 +41,7 @@ def _make_on_result(camera_id: int) -> Callable[[str], None]:
             asyncio.run_coroutine_threadsafe(
                 _broadcast_fn(make_vlm_push_payload(
                     "fire_pipeline",
-                    "CCTV 화재/연기 VLM 분석 완료",
+                    "CCTV 화재/연기 autoregressive VLM 분석 완료",
                     answer,
                     camera_id=camera_id,
                 )),

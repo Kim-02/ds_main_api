@@ -28,6 +28,7 @@ from database.db_handler import DatabaseHandler
 
 
 DEFAULT_SENSOR_ID = "watch-1386"
+DEFAULT_API_BASE_URL = "http://127.0.0.1:8080"
 
 WORKER_HR_DATA_COLUMNS = (
     "worker_hr_data_id",
@@ -214,6 +215,85 @@ def publish_watch_command(command: dict[str, Any]) -> dict[str, Any]:
             client.disconnect()
         except Exception as e:
             print(f"  [Pipeline] MQTT 종료 중 오류: {type(e).__name__}: {e}")
+
+
+def run_temperature_vlm_debug_api(
+    *,
+    api_base_url: str,
+    sensor_id: str,
+    camera_sen_id: int | None = None,
+    publish: bool = False,
+    require_hot: bool = False,
+) -> dict[str, Any]:
+    import requests
+
+    base_url = api_base_url.rstrip("/")
+    url = f"{base_url}/api/temperature-vlm/sensors/{sensor_id}/debug/run-once"
+    params: dict[str, Any] = {
+        "publish": str(bool(publish)).lower(),
+        "require_hot": str(bool(require_hot)).lower(),
+    }
+    if camera_sen_id is not None:
+        params["camera_sen_id"] = int(camera_sen_id)
+
+    print(f"  [Pipeline] call_temperature_vlm_debug_api url={url} params={params}")
+    response = requests.post(url, params=params, timeout=180)
+    print(f"  [Pipeline] response status_code={response.status_code}")
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"raw_text": response.text}
+
+    if response.status_code >= 400:
+        raise RuntimeError(f"API 실패 status={response.status_code} body={body}")
+
+    data = body.get("data", body)
+    for camera in data.get("cameras", []):
+        camera_meta = camera.get("camera", {})
+        text = camera.get("text", "")
+        print(
+            f"[VLM TEXT] camera_sen_id={camera_meta.get('sen_id')} "
+            f"space_id={camera_meta.get('space_id')} text={text}"
+        )
+    return data
+
+
+def run_temperature_vlm_debug_api_test(
+    *,
+    api_base_url: str,
+    sensor_id: str,
+    camera_sen_id: int | None = None,
+    publish: bool = False,
+    require_hot: bool = False,
+) -> None:
+    load_dotenv()
+    _section("온습도 CCTV autoregressive VLM 실제 API 실행")
+    results: dict[str, bool] = {}
+    try:
+        data = run_temperature_vlm_debug_api(
+            api_base_url=api_base_url,
+            sensor_id=sensor_id,
+            camera_sen_id=camera_sen_id,
+            publish=publish,
+            require_hot=require_hot,
+        )
+        camera_count = int(data.get("camera_count") or len(data.get("cameras", [])))
+        if data.get("skipped"):
+            _fail("온습도 VLM API", f"스킵됨 reason={data.get('reason')}")
+            results["온습도 VLM API"] = False
+        elif camera_count <= 0:
+            _fail("온습도 VLM API", "분석된 CCTV가 없습니다.")
+            results["온습도 VLM API"] = False
+        else:
+            _pass(
+                "온습도 VLM API",
+                f"sensor_id={sensor_id} space_id={data.get('space_id')} camera_count={camera_count}",
+            )
+            results["온습도 VLM API"] = True
+    except Exception as exc:
+        _fail("온습도 VLM API", f"{type(exc).__name__}: {exc}")
+        results["온습도 VLM API"] = False
+    _print_summary(results)
 
 
 # ─── 개별 테스트 함수 ─────────────────────────────────────────────────────────
@@ -495,7 +575,49 @@ def main() -> None:
         default=DEFAULT_SENSOR_ID,
         help=f"테스트할 센서 ID. 기본값: {DEFAULT_SENSOR_ID}",
     )
+    parser.add_argument(
+        "--temperature-vlm-api",
+        action="store_true",
+        help="서버의 실제 온습도 CCTV autoregressive VLM 1회 실행 API를 호출",
+    )
+    parser.add_argument(
+        "--temperature-sensor-id",
+        default="",
+        help="온습도 VLM API에 사용할 sensor.sensor_id. 비우면 positional sensor_id를 사용",
+    )
+    parser.add_argument(
+        "--api-base-url",
+        default=os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL),
+        help=f"API 서버 주소. 기본값: {DEFAULT_API_BASE_URL}",
+    )
+    parser.add_argument(
+        "--camera-sen-id",
+        type=int,
+        default=None,
+        help="특정 CCTV sen_id만 VLM 1회 실행",
+    )
+    parser.add_argument(
+        "--publish-vlm-result",
+        action="store_true",
+        help="VLM 결과를 WebSocket 앱 알림으로도 발행",
+    )
+    parser.add_argument(
+        "--require-hot",
+        action="store_true",
+        help="현재 온도가 임계치 이상일 때만 VLM 실행",
+    )
     args = parser.parse_args()
+    if args.temperature_vlm_api:
+        temperature_sensor_id = args.temperature_sensor_id or args.sensor_id
+        run_temperature_vlm_debug_api_test(
+            api_base_url=args.api_base_url,
+            sensor_id=temperature_sensor_id,
+            camera_sen_id=args.camera_sen_id,
+            publish=args.publish_vlm_result,
+            require_hot=args.require_hot,
+        )
+        return
+
     run_all_tests(args.sensor_id)
 
 

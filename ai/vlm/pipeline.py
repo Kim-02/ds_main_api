@@ -4,6 +4,7 @@ export_final/pipeline.py 기반, 임포트 경로를 프로젝트 구조에 맞�
 """
 import os
 import queue
+import logging
 import threading
 
 from ai.vlm.fire_pipeline.detector import YoloDetector, get_count_text, has_any_class
@@ -13,6 +14,8 @@ from ai.vlm.fire_pipeline.storage import RollingStorage
 from ai.vlm.fire_pipeline.video_source import VideoSource
 from ai.vlm.analysis import SafetyAnalysisVlm
 from ai.vlm.validator import MovementValidator
+
+logger = logging.getLogger(__name__)
 
 
 def _put_latest(q, item):
@@ -220,7 +223,7 @@ class VlmPipeline:
                 break
 
             request_number, summary, history = item
-            validation = validator.validate(summary, request_number)
+            validation = validator.validate(summary, request_number, history)
             summary["vlm_validation"] = validation
             summary["comparison_image_path"] = validation.get("comparison_image_path", "")
             self._set_latest_summary(summary)
@@ -257,6 +260,7 @@ class VlmPipeline:
 
     def _emit_result(self, answer):
         self._set_latest_result(answer)
+        logger.info("[VLM TEXT] event_type=legacy_cctv_vlm text=%s", answer)
 
         if self.on_result is not None:
             self.on_result(answer)

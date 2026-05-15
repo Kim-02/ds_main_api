@@ -1,4 +1,4 @@
-"""Watch-triggered workplace VLM sessions.
+"""Watch-triggered workplace autoregressive VLM sessions.
 
 휴식 권고가 발생한 워치와 같은 space_id의 카메라를 2분 동안 분석한다.
 같은 카메라가 이미 분석 중이면 종료 시간을 다시 2분 뒤로 연장한다.
@@ -12,22 +12,25 @@ import os
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote
 
 from config import settings
+from core.cctv_vlm_context import (
+    build_yolo_normalized_context_from_buffer,
+    build_yolo_normalized_context_from_frames,
+    public_yolo_context,
+)
 from core.notifications import make_vlm_push_payload
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SESSION_SECONDS = 120
 DEFAULT_ANALYSIS_INTERVAL_SECONDS = 30
-DEFAULT_FRAME_DIR = Path("watch_vlm_frames")
 
 
 class WatchCameraVlmManager:
-    """space_id 기준 카메라 VLM 세션을 관리한다."""
+    """space_id 기준 카메라 autoregressive VLM 세션을 관리한다."""
 
     def __init__(
         self,
@@ -37,7 +40,7 @@ class WatchCameraVlmManager:
         broadcast_fn: Optional[Callable[[dict], Any]] = None,
         session_seconds: int = DEFAULT_SESSION_SECONDS,
         analysis_interval_seconds: int = DEFAULT_ANALYSIS_INTERVAL_SECONDS,
-        prompt_builder: Optional[Callable[[dict, dict], str]] = None,
+        prompt_builder: Optional[Callable[..., str]] = None,
         event_type: str = "watch_camera_vlm",
     ):
         self._db_handler = db_handler
@@ -176,7 +179,7 @@ class WatchCameraVlmSession:
         manager: WatchCameraVlmManager,
         session_seconds: int,
         analysis_interval_seconds: int,
-        prompt_builder: Callable[[dict, dict], str],
+        prompt_builder: Callable[..., str],
         event_type: str,
     ):
         self.camera = camera
@@ -196,6 +199,7 @@ class WatchCameraVlmSession:
         self._latest_error = ""
         self._latest_frame_path = ""
         self._latest_frame_source = ""
+        self._latest_yolo_context: dict[str, Any] = {}
         self._started_at = ""
         self._updated_at = ""
         self._running = False
@@ -276,6 +280,11 @@ class WatchCameraVlmSession:
                 "latest_error": self._latest_error,
                 "latest_frame_path": self._latest_frame_path,
                 "latest_frame_source": self._latest_frame_source,
+                "latest_yolo_context": (
+                    public_yolo_context(self._latest_yolo_context)
+                    if self._latest_yolo_context
+                    else {}
+                ),
                 "started_at": self._started_at,
                 "updated_at": self._updated_at,
             }
@@ -287,15 +296,17 @@ class WatchCameraVlmSession:
                     break
 
                 try:
-                    frame_path = self._capture_frame()
-                    result = self._request_vlm(frame_path)
-                    self._set_result(result, frame_path, "")
+                    yolo_context = self._build_autoregressive_context()
+                    frame_path = str(yolo_context.get("image_path") or "")
+                    result = self._request_vlm(yolo_context)
+                    self._set_result(result, frame_path, "", yolo_context)
                     self.manager.publish_result(make_vlm_push_payload(
                         self.event_type,
                         _notification_title(self.event_type),
                         result,
                         camera=_public_camera(self.camera),
                         frame_path=frame_path,
+                        yolo_context=public_yolo_context(yolo_context),
                         status=self.status(),
                     ))
                 except Exception as exc:
@@ -324,46 +335,80 @@ class WatchCameraVlmSession:
         if wait_seconds > 0:
             self._wake_event.wait(wait_seconds)
 
-    def _capture_frame(self) -> str:
-        frame_path = self._capture_frame_from_buffer()
-        if frame_path:
-            return frame_path
+    def analyze_once(
+        self,
+        *,
+        watch_sensor_id: str,
+        worker_id: str | None = None,
+        prediction: dict | None = None,
+        publish: bool = False,
+    ) -> dict:
+        """Run one real CCTV autoregressive VLM request without starting a session thread."""
+        with self._lock:
+            self._trigger_count += 1
+            self._last_trigger = {
+                "watch_sensor_id": watch_sensor_id,
+                "worker_id": worker_id,
+                "prediction": prediction or {},
+                "triggered_at": _now_iso(),
+            }
+            self._updated_at = _now_iso()
+
+        yolo_context = self._build_autoregressive_context()
+        frame_path = str(yolo_context.get("image_path") or "")
+        result = self._request_vlm(yolo_context)
+        self._set_result(result, frame_path, "", yolo_context)
+
+        payload = make_vlm_push_payload(
+            self.event_type,
+            _notification_title(self.event_type),
+            result,
+            camera=_public_camera(self.camera),
+            frame_path=frame_path,
+            yolo_context=public_yolo_context(yolo_context),
+            status=self.status(),
+        )
+        if publish:
+            self.manager.publish_result(payload)
+
+        return {
+            "camera": _public_camera(self.camera),
+            "frame_path": frame_path,
+            "yolo_context": public_yolo_context(yolo_context),
+            "result": result,
+            "text": payload.get("text", ""),
+            "payload": payload,
+            "status": self.status(),
+        }
+
+    def _build_autoregressive_context(self) -> dict:
+        context = build_yolo_normalized_context_from_buffer(
+            self.camera,
+            _camera_id_candidates(self.camera),
+        )
+        if context is not None:
+            with self._lock:
+                self._latest_frame_source = context.source
+            return context.to_dict()
 
         logger.info(
-            "[WatchCameraVLM] buffer frame unavailable, fallback to RTSP camera_sen_id=%s candidates=%s",
+            "[WatchCameraVLM] YOLO buffer context unavailable, fallback to RTSP single-frame context camera_sen_id=%s candidates=%s",
             self.camera.get("sen_id"),
             _camera_id_candidates(self.camera),
         )
-        return self._capture_frame_from_rtsp()
+        frame = self._capture_raw_frame_from_rtsp()
+        fallback_camera_id = _camera_id_candidates(self.camera)
+        context = build_yolo_normalized_context_from_frames(
+            self.camera,
+            [{"timestamp": time.time(), "frame": frame}],
+            source="rtsp:fallback_single_frame",
+            source_camera_id=fallback_camera_id[0] if fallback_camera_id else None,
+        )
+        with self._lock:
+            self._latest_frame_source = context.source
+        return context.to_dict()
 
-    def _capture_frame_from_buffer(self) -> str | None:
-        try:
-            from cctv.buffer import get_recent_frames
-        except Exception as exc:
-            logger.warning("[WatchCameraVLM] cctv.buffer unavailable: %s", exc)
-            return None
-
-        buffer_seconds = float(getattr(settings, "frame_buffer_seconds", 10) or 10)
-        for camera_id in _camera_id_candidates(self.camera):
-            frames = get_recent_frames(camera_id, seconds=buffer_seconds)
-            if not frames:
-                continue
-
-            latest = frames[-1]
-            frame_path = self._write_frame(latest["frame"], source=f"buffer_{camera_id}")
-            with self._lock:
-                self._latest_frame_source = f"buffer:{camera_id}"
-            logger.info(
-                "[WatchCameraVLM] captured frame from buffer camera_sen_id=%s buffer_camera_id=%s frame_count=%s",
-                self.camera.get("sen_id"),
-                camera_id,
-                len(frames),
-            )
-            return frame_path
-
-        return None
-
-    def _capture_frame_from_rtsp(self) -> str:
+    def _capture_raw_frame_from_rtsp(self) -> Any:
         import cv2
 
         rtsp_url = _build_rtsp_url(self.camera)
@@ -393,25 +438,9 @@ class WatchCameraVlmSession:
         if frame is None:
             raise RuntimeError("RTSP frame read failed")
 
-        frame_path = self._write_frame(frame, source="rtsp")
-        with self._lock:
-            self._latest_frame_source = "rtsp"
-        return frame_path
+        return frame
 
-    def _write_frame(self, frame: Any, *, source: str) -> str:
-        import cv2
-
-        DEFAULT_FRAME_DIR.mkdir(parents=True, exist_ok=True)
-        filename = (
-            f"space_{self.camera.get('space_id')}_cam_{self.camera.get('sen_id')}_"
-            f"{source}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-        )
-        frame_path = DEFAULT_FRAME_DIR / filename
-        if not cv2.imwrite(str(frame_path), frame):
-            raise RuntimeError(f"Frame write failed: {frame_path}")
-        return str(frame_path)
-
-    def _request_vlm(self, frame_path: str) -> Any:
+    def _request_vlm(self, yolo_context: dict) -> Any:
         from ai.vlm.client import OpenAiCompatibleVlm, extract_json
 
         client = OpenAiCompatibleVlm(
@@ -420,19 +449,42 @@ class WatchCameraVlmSession:
             settings.vllm_model,
             timeout=settings.camera_vlm_request_timeout_seconds,
         )
-        prompt = self.prompt_builder(self.camera, self._last_trigger)
+        frame_path = str(yolo_context.get("image_path") or "")
+        prompt = _call_prompt_builder(self.prompt_builder, self.camera, self._last_trigger, yolo_context)
+        prompt = _limit_prompt_for_vlm(prompt)
+        logger.info(
+            "[WatchCameraVLM] autoregressive VLM request camera_sen_id=%s event_type=%s frame=%s yolo_context=%s",
+            self.camera.get("sen_id"),
+            self.event_type,
+            frame_path,
+            public_yolo_context(yolo_context),
+        )
         text = client.request_text(prompt, frame_path, max_tokens=512, temperature=0.2, stream=False)
+        logger.info(
+            "[VLM TEXT] event_type=%s camera_sen_id=%s text=%s",
+            self.event_type,
+            self.camera.get("sen_id"),
+            text,
+        )
         try:
             return extract_json(text)
         except Exception as exc:
             logger.warning("[WatchCameraVLM] JSON response parse failed: %s", exc)
             return {"raw_text": text}
 
-    def _set_result(self, result: Any, frame_path: str, error: str) -> None:
+    def _set_result(
+        self,
+        result: Any,
+        frame_path: str,
+        error: str,
+        yolo_context: dict | None = None,
+    ) -> None:
         with self._lock:
             self._latest_result = result
             self._latest_error = error
             self._latest_frame_path = frame_path
+            if yolo_context is not None:
+                self._latest_yolo_context = dict(yolo_context)
             self._updated_at = _now_iso()
 
 
@@ -446,9 +498,25 @@ def _build_rtsp_url(camera: dict) -> str:
     return f"rtsp://{username}:{password}@{ip_address}{path}"
 
 
-def _build_prompt(camera: dict, trigger: dict) -> str:
+def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | None) -> str:
+    return (
+        "분석 명칭: autoregressive VLM.\n"
+        "공통 CCTV 분석 계층:\n"
+        "1. 최근 10초 CCTV 프레임을 YOLO(person, fire, smoke)로 분석하고 저장합니다.\n"
+        "2. 저장된 프레임의 YOLO 결과를 정규화 텍스트로 요약합니다.\n"
+        "3. 이벤트가 발생하면 현재 첨부 이미지와 YOLO 정규화 텍스트를 함께 보고 판단합니다.\n"
+        "현재 이미지가 최우선 근거이며, 정규화 텍스트는 사람 이동/위험 객체 흐름 보정에만 사용하세요.\n"
+        "현재 이미지에 보이지 않는 사람이나 객체를 확정적으로 말하지 마세요.\n"
+        f"카메라={json.dumps(_public_camera(camera), ensure_ascii=False, default=str)}\n"
+        f"{_format_yolo_context_for_prompt(yolo_context)}\n"
+    )
+
+
+def _build_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
     trigger_json = json.dumps(trigger, ensure_ascii=False)
     return (
+        build_common_autoregressive_vlm_prompt(camera, yolo_context)
+        + "이벤트별 목적: 휴식 권고가 발생한 작업자와 같은 공간의 작업장 상태 확인입니다.\n"
         "현재 CCTV 화면을 보고 작업장 상태를 JSON 하나로만 답하세요.\n"
         "휴식 권고가 발생한 작업자와 같은 공간의 작업장 상태 확인이 목적입니다.\n"
         "불확실한 내용은 추측하지 말고 unknown 또는 빈 배열로 표시하세요.\n"
@@ -460,9 +528,67 @@ def _build_prompt(camera: dict, trigger: dict) -> str:
         "\"visible_risks\":[\"fire\",\"smoke\",\"fall\",\"crowding\",\"unsafe_posture\",\"none\"],"
         "\"recommended_action\":\"필요 조치 한 문장\""
         "}\n"
-        f"카메라={_public_camera(camera)}\n"
         f"휴식권고={trigger_json}"
     )
+
+
+def _call_prompt_builder(
+    prompt_builder: Callable[..., str],
+    camera: dict,
+    trigger: dict,
+    yolo_context: dict,
+) -> str:
+    try:
+        return prompt_builder(camera, trigger, yolo_context)
+    except TypeError as exc:
+        try:
+            return prompt_builder(camera, trigger)
+        except TypeError:
+            raise exc
+
+
+def _format_yolo_context_for_prompt(yolo_context: dict | None) -> str:
+    if not yolo_context:
+        return "YOLO정규화메타={}\nYOLO정규화텍스트=\n[YOLO compact history]\nmissing"
+
+    metadata = public_yolo_context(yolo_context)
+    text = str(yolo_context.get("normalized_text") or "")
+    max_chars = int(getattr(settings, "cctv_vlm_yolo_context_prompt_max_chars", 2600) or 2600)
+    return (
+        f"YOLO정규화메타={json.dumps(metadata, ensure_ascii=False, default=str)}\n"
+        "YOLO정규화텍스트=\n"
+        f"{_limit_text(text, max_chars)}"
+    )
+
+
+def _limit_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    marker = "\n...[truncated]"
+    return text[: max(0, max_chars - len(marker))] + marker
+
+
+def _limit_prompt_for_vlm(prompt: str) -> str:
+    max_chars = int(getattr(settings, "camera_vlm_prompt_max_chars", 6000) or 6000)
+    if len(prompt) <= max_chars:
+        return prompt
+
+    logger.warning(
+        "[WatchCameraVLM] autoregressive VLM prompt truncated chars=%s max_chars=%s",
+        len(prompt),
+        max_chars,
+    )
+    return _limit_text(prompt, max_chars)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
 
 
 def _public_camera(camera: dict) -> dict:
@@ -472,6 +598,8 @@ def _public_camera(camera: dict) -> dict:
         "sen_name": camera.get("sen_name"),
         "space_id": camera.get("space_id"),
         "space_name": camera.get("space_name"),
+        "hazard_type": camera.get("hazard_type"),
+        "is_hazard": _as_bool(camera.get("is_hazard")),
         "ip_address": camera.get("ip_address"),
         "health": camera.get("health"),
         "is_online": camera.get("is_online"),
@@ -480,10 +608,10 @@ def _public_camera(camera: dict) -> dict:
 
 def _notification_title(event_type: str) -> str:
     if event_type == "temperature_camera_vlm":
-        return "고온 구역 CCTV VLM 분석 완료"
+        return "고온 구역 CCTV autoregressive VLM 분석 완료"
     if event_type == "watch_camera_vlm":
-        return "휴식 권고 구역 CCTV VLM 분석 완료"
-    return "CCTV VLM 분석 완료"
+        return "휴식 권고 구역 CCTV autoregressive VLM 분석 완료"
+    return "CCTV autoregressive VLM 분석 완료"
 
 
 def _camera_id_candidates(camera: dict) -> list[int]:

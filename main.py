@@ -236,7 +236,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("온도 파이프라인 스케줄러 시작 완료")
 
-    # 9. CCTV VLM 파이프라인 — CCTV_RTSP_URL 설정 시 자동 시작
+    # 9. CCTV autoregressive VLM 파이프라인 — CCTV_RTSP_URL 설정 시 자동 시작
     app.state.vlm_runner = None
     if settings.cctv_rtsp_url:
         from ai.vlm.cctv_runner import CctvVlmRunner
@@ -248,7 +248,7 @@ async def lifespan(app: FastAPI):
             asyncio.run_coroutine_threadsafe(
                 ws_manager.broadcast(make_vlm_push_payload(
                     "vlm_analysis",
-                    "CCTV VLM 분석 완료",
+                    "CCTV autoregressive VLM 분석 완료",
                     text,
                 )),
                 main_loop,
@@ -260,9 +260,9 @@ async def lifespan(app: FastAPI):
         )
         vlm_runner.start()
         app.state.vlm_runner = vlm_runner
-        logger.info("CCTV VLM 파이프라인 시작 완료 source=%s", settings.cctv_rtsp_url)
+        logger.info("CCTV autoregressive VLM 파이프라인 시작 완료 source=%s", settings.cctv_rtsp_url)
     else:
-        logger.info("CCTV VLM 파이프라인 비활성화 (CCTV_RTSP_URL 미설정)")
+        logger.info("CCTV autoregressive VLM 파이프라인 비활성화 (CCTV_RTSP_URL 미설정)")
 
     # 10. Fire pipeline manager (CCTV 화재 감지 — cctv/fire_pipeline/ 모듈 기반)
     fire_manager = None
@@ -334,7 +334,7 @@ async def lifespan(app: FastAPI):
         if app.state.vlm_runner is not None:
             app.state.vlm_runner.stop()
     except Exception as e:
-        logger.warning("CCTV VLM 파이프라인 종료 중 오류: %s", e)
+        logger.warning("CCTV autoregressive VLM 파이프라인 종료 중 오류: %s", e)
 
     try:
         watch_scheduler.stop()
@@ -605,4 +605,3 @@ if __name__ == "__main__":
         port=settings.api_port,
         reload=settings.debug,
     )
-

@@ -43,7 +43,13 @@ class SafetyAnalysisVlm:
     def make_prompt(self, normalized_text, validation):
         validation_text = json.dumps(self._compact_validation(validation), ensure_ascii=False)
         prefix = (
-            "이미지에 현재 보이는 내용을 가장 우선으로 분석하세요. YOLO 정규화 이력은 보조 근거입니다.\n"
+            "분석 명칭: autoregressive VLM.\n"
+            "공통 CCTV 분석 계층:\n"
+            "1. 최근 10초 CCTV 프레임을 YOLO(person, fire, smoke)로 분석하고 저장합니다.\n"
+            "2. 저장된 프레임의 YOLO 결과를 정규화 텍스트로 요약합니다.\n"
+            "3. 위험감지 이벤트가 발생하면 현재 이미지와 YOLO 정규화 텍스트를 함께 보고 판단합니다.\n"
+            "이미지에 현재 보이는 내용을 가장 우선으로 분석하세요. "
+            "YOLO 정규화 이력은 사람 이동/위험 객체 흐름 보정용 보조 근거입니다.\n"
             "마지막 화면에 안 보이는 사람/객체는 현재 이동 중이라고 말하지 마세요.\n"
             "불/연기 이상상황, 사람 이동 위치, 최근 이력을 반영해 안전 정보를 반환하세요.\n"
             "정확히 3줄만 출력하세요. 각 줄 40자 이내, 질문 금지.\n"

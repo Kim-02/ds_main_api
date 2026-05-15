@@ -1,4 +1,4 @@
-"""Fire detection pipeline — 카메라별 CCTV YOLO/VLM 파이프라인."""
+"""Fire detection pipeline — 카메라별 CCTV YOLO/autoregressive VLM 파이프라인."""
 import os
 import queue
 import logging
@@ -66,9 +66,19 @@ class ExportFinalPipeline:
             self.storage.clean_start_files()
             self.clean_validation_images()
 
-        yolo_thread = threading.Thread(target=self.yolo_worker, name="fire-pl-yolo")
-        validation_thread = threading.Thread(target=self.validation_worker, name="fire-pl-validation-vlm")
-        analysis_thread = threading.Thread(target=self.analysis_worker, name="fire-pl-analysis-vlm")
+        camera_suffix = ""
+        if self.config.camera_id is not None:
+            camera_suffix = "-cam" + str(self.config.camera_id)
+
+        yolo_thread = threading.Thread(target=self.yolo_worker, name="fire-pl-yolo" + camera_suffix)
+        validation_thread = threading.Thread(
+            target=self.validation_worker,
+            name="fire-pl-validation-vlm" + camera_suffix,
+        )
+        analysis_thread = threading.Thread(
+            target=self.analysis_worker,
+            name="fire-pl-analysis-vlm" + camera_suffix,
+        )
 
         yolo_thread.start()
         validation_thread.start()
@@ -324,7 +334,7 @@ class ExportFinalPipeline:
                 break
 
             request_number, summary, history = item
-            validation = validator.validate(summary, request_number)
+            validation = validator.validate(summary, request_number, history)
             summary["vlm_validation"] = validation
             summary["comparison_image_path"] = validation.get("comparison_image_path", "")
             self.set_latest_summary(summary)
@@ -377,6 +387,11 @@ class ExportFinalPipeline:
 
     def emit_result(self, answer):
         self.set_latest_result(answer)
+        logger.info(
+            "[VLM TEXT] event_type=fire_pipeline camera_id=%s text=%s",
+            self.config.camera_id,
+            answer,
+        )
 
         if self.on_result is not None:
             self.on_result(answer)

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from core.temperature_pipeline.runner import run_temperature_camera_vlm_once
 
 router = APIRouter(prefix="/api/temperature-vlm", tags=["temperature-vlm"])
 
@@ -22,7 +24,7 @@ def get_temperature_scheduler_status(request: Request):
     return {"status": "success", "data": _get_scheduler(request).get_status()}
 
 
-@router.get("/sessions", summary="온도 연동 카메라 VLM 세션 전체 조회")
+@router.get("/sessions", summary="온도 연동 카메라 autoregressive VLM 세션 전체 조회")
 def get_temperature_camera_vlm_sessions(request: Request):
     return {"status": "success", "data": _get_manager(request).get_status()}
 
@@ -39,6 +41,33 @@ def trigger_temperature_camera_vlm(sensor_id: str, request: Request):
     if not sample:
         raise HTTPException(status_code=404, detail="temperature sensor or sample not found")
     result = _get_manager(request).trigger_for_temperature_sensor(sensor_id, sample)
+    return {"status": "success", "data": result}
+
+
+@router.post(
+    "/sensors/{sensor_id}/debug/run-once",
+    summary="실제 DB/CCTV/YOLO/autoregressive VLM 1회 실행 디버그",
+)
+def run_temperature_camera_vlm_once_debug(
+    sensor_id: str,
+    request: Request,
+    camera_sen_id: int | None = Query(default=None, description="특정 CCTV sen_id만 실행"),
+    publish: bool = Query(default=False, description="true면 WebSocket 앱 알림까지 발행"),
+    require_hot: bool = Query(default=False, description="true면 온도가 임계치 이상일 때만 실행"),
+):
+    try:
+        result = run_temperature_camera_vlm_once(
+            request.app.state.db,
+            sensor_id,
+            manager=_get_manager(request),
+            camera_sen_id=camera_sen_id,
+            publish=publish,
+            require_hot=require_hot,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
     return {"status": "success", "data": result}
 
 

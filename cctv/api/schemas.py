@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CameraCreate(BaseModel):
@@ -66,6 +66,8 @@ class CameraOut(BaseModel):
     process_id: Optional[int] = None
     space_id: Optional[int] = None
     space_name: Optional[str] = None
+    hazard_type: Optional[str] = None
+    is_hazard: bool = False
     is_active: bool
     is_online: bool
     registered_at: Optional[datetime] = None
@@ -78,6 +80,9 @@ class FirePipelineStatus(BaseModel):
     running: bool
     latest_result: str
     latest_error: str = ""
+    rtsp_reader: dict[str, Any] = Field(default_factory=dict)
+    frame_buffer: dict[str, Any] = Field(default_factory=dict)
+    fire_pipeline: dict[str, Any] = Field(default_factory=dict)
 
 
 class FirePipelineActionResponse(BaseModel):

@@ -337,12 +337,27 @@ def get_fire_pipeline_status(
     except ImportError:
         status_data = {"running": False, "latest_result": "", "latest_error": ""}
 
+    try:
+        from cctv.rtsp import get_reader_status
+        reader_status = get_reader_status(sensor_id)
+    except Exception:
+        reader_status = {"camera_id": sensor_id, "running": False, "latest_error": "status_unavailable"}
+
+    try:
+        from cctv.buffer import get_buffer_status
+        buffer_status = get_buffer_status(sensor_id)
+    except Exception:
+        buffer_status = {"camera_id": sensor_id, "running": False, "latest_error": "status_unavailable"}
+
     return {
         "sensor_id": sensor_id,
         "camera_id": sensor_id,
         "running": status_data.get("running", False),
         "latest_result": status_data.get("latest_result", ""),
         "latest_error": status_data.get("latest_error", ""),
+        "rtsp_reader": reader_status,
+        "frame_buffer": buffer_status,
+        "fire_pipeline": status_data,
     }
 
 
@@ -479,6 +494,8 @@ def _row_to_camera_out(row: dict) -> dict:
         "process_id": row.get("space_id"),
         "space_id": row.get("space_id"),
         "space_name": row.get("space_name"),
+        "hazard_type": row.get("hazard_type"),
+        "is_hazard": bool(row.get("is_hazard")),
         "is_active": is_online,
         "is_online": is_online,
         "registered_at": registered_at,
@@ -495,4 +512,3 @@ def _serialize_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     return None
-

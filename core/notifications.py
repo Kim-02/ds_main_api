@@ -17,7 +17,7 @@ def make_vlm_push_payload(
         "push": True,
         "notification_type": "vlm_analysis",
         "title": title,
-        "body": text or "VLM 분석이 완료되었습니다.",
+        "body": text or "autoregressive VLM 분석이 완료되었습니다.",
         "text": text,
         "result": result,
     }

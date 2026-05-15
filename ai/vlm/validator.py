@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from ai.vlm.client import OpenAiCompatibleVlm
+from ai.vlm.fire_pipeline.prompt_builder import make_compact_vlm_text
 
 
 def limit_text(text, max_chars):
@@ -98,17 +99,20 @@ def make_compare_image(first_path, last_path, output_path, max_height=360):
     return output_path
 
 
-def build_validation_prompt(payload, max_chars):
+def build_validation_prompt(payload, max_chars, normalized_text=""):
     payload_text = json.dumps(payload, ensure_ascii=False)
     prefix = (
+        "분석 명칭: autoregressive VLM.\n"
+        "공통 CCTV 분석 계층: YOLO 정규화 텍스트와 첫/마지막 비교 이미지를 함께 보고 이동 방향을 보정합니다.\n"
         "왼쪽=첫 프레임, 오른쪽=마지막 프레임입니다. 현재 보이는 person/fire/smoke box를 우선 비교해 이동 방향과 위험을 검증하세요.\n"
         "마지막 프레임에 보이지 않는 사람/객체는 현재 이동 판단에서 제외하세요.\n"
         "반드시 JSON만 출력하세요. 값은 짧게 쓰세요.\n"
         '{"movement_valid":true,"person_direction":"left|right|up|down|stable|unknown","corrected_direction":"left|right|up|down|stable|unknown","fire_direction":"left|right|up|down|stable|unknown","smoke_direction":"left|right|up|down|stable|unknown","risk_level":"low|medium|high|unknown","situation":"짧게","reason_prediction":"짧게","evidence":"짧게"}\n'
-        "data="
+        "YOLO정규화텍스트=\n"
     )
-    allowed = max_chars - len(prefix)
-    return limit_text(prefix + limit_text(payload_text, max(0, allowed)), max_chars)
+    middle = limit_text(str(normalized_text or ""), max_chars // 2) + "\n비교데이터="
+    allowed = max_chars - len(prefix) - len(middle)
+    return limit_text(prefix + middle + limit_text(payload_text, max(0, allowed)), max_chars)
 
 
 def normalize_validation_result(data):
@@ -140,8 +144,9 @@ class MovementValidator:
         self.client = client
         self.config = config
 
-    def validate(self, summary, request_number):
+    def validate(self, summary, request_number, history=None):
         payload = build_validation_payload(summary)
+        normalized_text = make_compact_vlm_text(history or summary)
         first_frame, last_frame = get_first_last_frames(summary)
         first_path = first_frame.get("image_path", "") if first_frame else ""
         last_path = last_frame.get("image_path", "") if last_frame else ""
@@ -154,7 +159,11 @@ class MovementValidator:
             first_path, last_path, compare_path,
             self.config.validation_compare_height,
         )
-        prompt = build_validation_prompt(payload, self.config.validation_prompt_max_chars)
+        prompt = build_validation_prompt(
+            payload,
+            self.config.validation_prompt_max_chars,
+            normalized_text,
+        )
 
         try:
             data = self.client.request_json(

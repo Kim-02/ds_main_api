@@ -2,7 +2,7 @@ from config import settings
 
 
 class VlmPipelineConfig:
-    """프로젝트 settings를 기반으로 VLM 파이프라인 설정을 구성한다."""
+    """프로젝트 settings를 기반으로 autoregressive VLM 파이프라인 설정을 구성한다."""
 
     def __init__(self, rtsp_url: str = ""):
         # 영상 소스 (RTSP URL 또는 파일 경로)
