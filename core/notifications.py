@@ -7,13 +7,19 @@ from typing import Any
 
 
 def make_hazard_alert_ws_payload(
-    event_id: int,
+    event_id: int | None,
     message: str,
     *,
+    title: str = "온습도 위험 감지",
+    level: str = "warning",
+    space_id: int | None = None,
+    jetson_id: int | None = None,
+    camera_sen_id: int | None = None,
+    sensor_id: str | None = None,
     camera_name: str = "",
     camera_loc: str = "",
-    ev_code_name: str = "온습도 위험 감지",
-    color: str = "red",
+    ev_code_name: str | None = None,
+    source: str = "temperature_vlm",
     vibration: bool = True,
     led: bool = True,
     duration_ms: int = 3000,
@@ -21,18 +27,29 @@ def make_hazard_alert_ws_payload(
     event_time: str | None = None,
 ) -> dict:
     """앱의 HazardAlert 모델과 1:1 매핑되는 WebSocket 알림 payload를 반환한다."""
+    color_map = {"danger": "red", "warning": "orange", "info": "yellow"}
+    color = color_map.get(level, "yellow")
+    created_at = event_time or datetime.now().isoformat(timespec="seconds")
     return {
         "type": "hazard_alert",
         "event_id": event_id,
         "target_topic": "",
         "alert": True,
         "message": message,
+        "title": title,
+        "level": level,
+        "source": source,
+        "space_id": space_id,
+        "jetson_id": jetson_id,
+        "camera_sen_id": camera_sen_id,
+        "sensor_id": sensor_id,
         "color": color,
         "vibration": vibration,
         "camera_name": camera_name,
         "camera_loc": camera_loc,
-        "ev_code_name": ev_code_name,
-        "event_time": event_time or datetime.now().isoformat(timespec="seconds"),
+        "ev_code_name": ev_code_name or title,
+        "event_time": created_at,
+        "created_at": created_at,
         "led": led,
         "duration_ms": duration_ms,
         "reset_after_ms": reset_after_ms,

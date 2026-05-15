@@ -1716,47 +1716,82 @@ class DatabaseHandler:
             logging.error("save_event_log 오류: %s", e)
             return {"event_id": int(datetime.now().timestamp() * 1000)}
 
-    def save_vlm_alert_event(
-        self,
-        *,
-        sen_id: int | None,
-        message: str,
-        ev_code_name: str = "VLM 알림",
-        risk_level: str | None = None,
-    ) -> int:
-        """VLM 분석 결과를 event 테이블에 저장한다. 저장된 event_id를 반환한다."""
-        # risk_level → detected_value 매핑 (level 조회에 재활용)
-        detected_value = risk_level if risk_level in {"low", "medium", "high"} else None
+    def ensure_alert_event_table(self) -> None:
+        """alert_event 테이블이 없으면 자동으로 생성한다."""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "SELECT ev_code_id FROM event_code WHERE ev_code_name = %s LIMIT 1",
-                        (ev_code_name,),
+                        """
+                        CREATE TABLE IF NOT EXISTS alert_event (
+                            event_id      INT AUTO_INCREMENT PRIMARY KEY,
+                            space_id      INT NULL,
+                            jetson_id     INT NULL,
+                            camera_sen_id INT NULL,
+                            sensor_id     VARCHAR(100) NULL,
+                            title         VARCHAR(200) NOT NULL,
+                            message       TEXT NOT NULL,
+                            level         VARCHAR(30)  NOT NULL DEFAULT 'warning',
+                            source        VARCHAR(50)  NOT NULL DEFAULT 'vlm',
+                            event_type    VARCHAR(100) NULL,
+                            is_read       TINYINT(1)   NOT NULL DEFAULT 0,
+                            created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_alert_event_space_created (space_id, created_at),
+                            INDEX idx_alert_event_sensor (sensor_id),
+                            INDEX idx_alert_event_camera (camera_sen_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                        """
                     )
-                    row = cursor.fetchone()
-                    if row:
-                        ev_code_id = row["ev_code_id"]
-                    else:
-                        cursor.execute(
-                            "INSERT INTO event_code (ev_code_name) VALUES (%s)",
-                            (ev_code_name,),
-                        )
-                        ev_code_id = cursor.lastrowid
+                conn.commit()
+        except Exception as e:
+            logging.error("ensure_alert_event_table 오류: %s", e)
 
+    def save_vlm_alert_event(
+        self,
+        *,
+        space_id: int | None = None,
+        jetson_id: int | None = None,
+        camera_sen_id: int | None = None,
+        sensor_id: str | None = None,
+        title: str,
+        message: str,
+        level: str = "warning",
+        source: str = "vlm",
+        event_type: str | None = None,
+    ) -> int | None:
+        """VLM 분석 결과를 alert_event 테이블에 저장한다. 저장된 event_id를 반환한다."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        INSERT INTO event (ev_code_id, sen_id, message, detected_value, time)
-                        VALUES (%s, %s, %s, %s, NOW())
+                        INSERT INTO alert_event
+                            (space_id, jetson_id, camera_sen_id, sensor_id,
+                             title, message, level, source, event_type)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
-                        (ev_code_id, sen_id, message, detected_value),
+                        (
+                            space_id,
+                            jetson_id,
+                            camera_sen_id,
+                            sensor_id,
+                            title,
+                            message,
+                            level,
+                            source,
+                            event_type,
+                        ),
                     )
                     event_id = cursor.lastrowid
                 conn.commit()
+            logging.info(
+                "[VLM_ALERT] saved event_id=%s space_id=%s camera_sen_id=%s sensor_id=%s level=%s",
+                event_id, space_id, camera_sen_id, sensor_id, level,
+            )
             return event_id
         except Exception as e:
             logging.error("save_vlm_alert_event 오류: %s", e)
-            return int(datetime.now().timestamp()) % (2 ** 31)
+            return None
 
     def process_ai_event(self, req_payload: dict) -> dict:
         ip_address = req_payload["ip_address"]
@@ -2462,7 +2497,7 @@ class DatabaseHandler:
     # ------------------------------------------------------------------
 
     def get_recent_alerts_by_space_id(self, space_id: int, limit: int = 20) -> list[dict]:
-        """space_id 기준 최근 이벤트/알림 조회. event 테이블과 sensor JOIN."""
+        """space_id 기준 최근 알림 조회 (alert_event 테이블 기반)."""
         limit = min(max(1, limit), 100)
         try:
             with self._get_connection() as conn:
@@ -2470,25 +2505,19 @@ class DatabaseHandler:
                     cursor.execute(
                         """
                         SELECT
-                            e.event_id,
-                            s.space_id,
-                            COALESCE(ec.ev_code_name, 'VLM 알림') AS title,
-                            COALESCE(e.message, '') AS message,
-                            CASE
-                                WHEN e.detected_value = 'high'   THEN 'danger'
-                                WHEN e.detected_value = 'medium' THEN 'warning'
-                                WHEN e.detected_value = 'low'    THEN 'info'
-                                ELSE 'danger'
-                            END AS level,
-                            'vlm' AS source,
-                            s.sen_name AS camera_name,
-                            e.time AS created_at,
-                            CASE WHEN e.status IS NOT NULL AND e.status != 'open' THEN 1 ELSE 0 END AS is_read
-                        FROM event e
-                        LEFT JOIN sensor s ON e.sen_id = s.sen_id
-                        LEFT JOIN event_code ec ON e.ev_code_id = ec.ev_code_id
-                        WHERE s.space_id = %s
-                        ORDER BY e.time DESC
+                            ae.event_id,
+                            ae.space_id,
+                            ae.title,
+                            ae.message,
+                            ae.level,
+                            ae.source,
+                            ae.is_read,
+                            ae.created_at,
+                            COALESCE(s.sen_name, ae.sensor_id) AS camera_name
+                        FROM alert_event ae
+                        LEFT JOIN sensor s ON ae.camera_sen_id = s.sen_id
+                        WHERE ae.space_id = %s
+                        ORDER BY ae.created_at DESC
                         LIMIT %s
                         """,
                         (space_id, limit),
@@ -2497,7 +2526,10 @@ class DatabaseHandler:
                     for row in rows:
                         if row.get("created_at") and hasattr(row["created_at"], "strftime"):
                             row["created_at"] = row["created_at"].strftime("%Y-%m-%d %H:%M:%S")
-                    return rows
+            logging.info(
+                "[DASHBOARD] recent alerts space_id=%s count=%s", space_id, len(rows)
+            )
+            return rows
         except Exception as e:
             logging.error("get_recent_alerts_by_space_id 오류: %s", e)
             return []
@@ -2670,10 +2702,9 @@ class DatabaseHandler:
                     cursor.execute(
                         """
                         SELECT COUNT(*) AS cnt
-                        FROM event e
-                        JOIN sensor s ON e.sen_id = s.sen_id
-                        WHERE s.space_id = %s
-                          AND (e.status IS NULL OR e.status = 'open')
+                        FROM alert_event
+                        WHERE space_id = %s
+                          AND is_read = 0
                         """,
                         (space_id,),
                     )

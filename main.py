@@ -123,6 +123,7 @@ async def lifespan(app: FastAPI):
     )
 
     app.state.db = db
+    db.ensure_alert_event_table()
 
     # 2. IP 감지 + Jetson DB 업데이트
     from core.jetson.service import get_real_ip, startup_db_init
