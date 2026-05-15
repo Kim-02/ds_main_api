@@ -153,11 +153,50 @@ class TemperatureCameraVlmManager:
             session.stop()
 
     def publish_result(self, payload: dict) -> None:
+        # 1. DB 저장
+        event_id = self._save_alert_to_db(payload)
+
+        # 2. 앱 HazardAlert 모델과 호환되는 hazard_alert payload 구성 및 broadcast
         if self._loop is None or self._broadcast_fn is None:
             return
         import asyncio
+        from core.notifications import extract_vlm_text, make_hazard_alert_ws_payload
 
-        asyncio.run_coroutine_threadsafe(self._broadcast_fn(payload), self._loop)
+        camera = payload.get("camera") or {}
+        result = payload.get("result") or {}
+        message = extract_vlm_text(result) or payload.get("text") or "온습도 이상 감지 - VLM 분석 완료"
+        risk_level = result.get("risk_level") if isinstance(result, dict) else None
+        color = "red" if risk_level == "high" else ("orange" if risk_level == "medium" else "yellow")
+
+        ws_payload = make_hazard_alert_ws_payload(
+            event_id=event_id,
+            message=message,
+            camera_name=camera.get("sen_name") or "",
+            camera_loc=camera.get("space_name") or "",
+            ev_code_name="온습도 위험 감지",
+            color=color,
+            vibration=True,
+        )
+        asyncio.run_coroutine_threadsafe(self._broadcast_fn(ws_payload), self._loop)
+
+    def _save_alert_to_db(self, payload: dict) -> int:
+        """VLM 분석 결과를 event 테이블에 저장하고 event_id를 반환한다."""
+        try:
+            camera = payload.get("camera") or {}
+            sen_id = camera.get("sen_id")
+            from core.notifications import extract_vlm_text
+            result = payload.get("result") or {}
+            message = extract_vlm_text(result) or payload.get("text") or "온습도 이상 감지"
+            risk_level = result.get("risk_level") if isinstance(result, dict) else None
+            return self._db_handler.save_vlm_alert_event(
+                sen_id=int(sen_id) if sen_id is not None else None,
+                message=message,
+                ev_code_name="온습도 위험 감지",
+                risk_level=risk_level,
+            )
+        except Exception as exc:
+            logger.exception("[TemperatureVLM] DB 알림 저장 실패: %s", exc)
+            return int(datetime.now().timestamp()) % (2 ** 31)
 
     def _start_or_extend(self, camera: dict, *, sensor_id: str, trigger: dict) -> tuple[str, dict]:
         sen_id = int(camera["sen_id"])
