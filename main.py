@@ -23,17 +23,28 @@ class ConnectionManager:
     async def connect(self, ws: WebSocket):
         await ws.accept()
         self.active_connections.append(ws)
+        logger.info("[WS] client connected id=%s total_clients=%d", id(ws), len(self.active_connections))
 
     def disconnect(self, ws: WebSocket):
         if ws in self.active_connections:
             self.active_connections.remove(ws)
+        logger.info("[WS] client disconnected id=%s total_clients=%d", id(ws), len(self.active_connections))
 
     async def broadcast(self, message: dict):
+        event_id = message.get("event_id", "-")
+        msg_type = message.get("type", "-")
+        n = len(self.active_connections)
+        logger.info("[WS] broadcasting type=%s event_id=%s clients=%d", msg_type, event_id, n)
+        dead = []
         for ws in list(self.active_connections):
             try:
                 await ws.send_json(message)
-            except Exception:
-                pass
+                logger.info("[WS] send ok client=%s event_id=%s", id(ws), event_id)
+            except Exception as exc:
+                logger.warning("[WS] send failed client=%s event_id=%s error=%s", id(ws), event_id, exc)
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
 
 
 ws_manager = ConnectionManager()
@@ -496,12 +507,13 @@ app.include_router(reports_router)
 @app.websocket("/ws/alerts")
 async def ws_alerts(websocket: WebSocket):
     await ws_manager.connect(websocket)
-    logger.info("WebSocket 연결 (alerts) — 연결 수: %d", len(ws_manager.active_connections))
-
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception as exc:
+        logger.warning("[WS] alerts connection error id=%s error=%s", id(websocket), exc)
         ws_manager.disconnect(websocket)
 
 
