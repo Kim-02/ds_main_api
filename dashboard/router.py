@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from .schemas import (
     DashboardCctvsResponse,
@@ -74,6 +74,21 @@ def get_dashboard_cctvs(
 
     data = request.app.state.db.get_dashboard_cctvs_by_space_id(space_id)
     return {"status": "success", "data": data}
+
+
+@router.patch(
+    "/alerts/{event_id}/read",
+    summary="알림 읽음 처리",
+)
+def mark_alert_as_read(
+    request: Request,
+    event_id: int = Path(..., description="alert_event.event_id"),
+    space_id: int | None = Query(None, description="space_id (선택, 검증용)"),
+):
+    ok = request.app.state.db.mark_alert_as_read(event_id, space_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="알림을 찾을 수 없습니다.")
+    return {"success": True, "message": "alert marked as read"}
 
 
 @router.get("/workers", response_model=DashboardWorkersResponse, summary="작업자 목록 (센서 매핑 기준)")

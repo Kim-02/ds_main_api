@@ -2526,6 +2526,9 @@ class DatabaseHandler:
                     for row in rows:
                         if row.get("created_at") and hasattr(row["created_at"], "strftime"):
                             row["created_at"] = row["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+            for row in rows:
+                if "is_read" in row:
+                    row["is_read"] = bool(row["is_read"])
             logging.info(
                 "[DASHBOARD] recent alerts space_id=%s count=%s", space_id, len(rows)
             )
@@ -2533,6 +2536,27 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("get_recent_alerts_by_space_id 오류: %s", e)
             return []
+
+    def mark_alert_as_read(self, event_id: int, space_id: int | None = None) -> bool:
+        """alert_event 테이블의 is_read를 1로 업데이트한다."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if space_id is not None:
+                        cursor.execute(
+                            "UPDATE alert_event SET is_read = 1 WHERE event_id = %s AND space_id = %s",
+                            (event_id, space_id),
+                        )
+                    else:
+                        cursor.execute(
+                            "UPDATE alert_event SET is_read = 1 WHERE event_id = %s",
+                            (event_id,),
+                        )
+                conn.commit()
+            return True
+        except Exception as e:
+            logging.error("mark_alert_as_read 오류: %s", e)
+            return False
 
     def get_dashboard_sensors_by_space_id(self, space_id: int) -> list[dict]:
         """space_id 기준 센서 목록 (camera/cctv/rtsp 계열 제외)."""

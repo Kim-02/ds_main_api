@@ -53,6 +53,7 @@ def make_hazard_alert_ws_payload(
         "led": led,
         "duration_ms": duration_ms,
         "reset_after_ms": reset_after_ms,
+        "is_read": False,
     }
 
 
