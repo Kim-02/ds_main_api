@@ -524,6 +524,7 @@ def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | No
     return (
         "분석: autoregressive VLM. 현재 CCTV 이미지가 최우선, YOLO 10초 정규화는 이동/위험 흐름 보조입니다.\n"
         "현재 이미지에 안 보이는 사람/객체를 확정하지 마세요.\n"
+        "화재/연기/열원은 현재 이미지 또는 YOLO정규화텍스트에 근거가 있을 때만 확정하세요.\n"
         f"카메라={json.dumps(_compact_camera_for_prompt(camera), ensure_ascii=False, default=str)}\n"
         f"{_format_yolo_context_for_prompt(yolo_context)}\n"
     )
@@ -611,21 +612,37 @@ def _build_retry_prompt(camera: dict, trigger: dict, yolo_context: dict) -> str:
     camera_text = json.dumps(_compact_camera_for_prompt(camera), ensure_ascii=False, default=str)
     trigger_text = _limit_text(json.dumps(trigger, ensure_ascii=False, default=str), 260)
     yolo_text = _limit_text(str(yolo_context.get("normalized_text") or ""), 360)
+    hazard_type = _extract_hazard_type(camera, trigger)
     prompt = (
         "분석 명칭: autoregressive VLM.\n"
         "현재 CCTV 이미지가 최우선입니다. YOLO 이력은 보조 근거입니다.\n"
+        "화재/연기/열원은 보일 때만 확정하세요. 온도센서 값은 작업자 체온이 아니라 작업장 환경 온도입니다.\n"
+        "등록위험물이 있으면 위험물별 경고와 대처를 반드시 포함하세요. 코드블록 금지.\n"
         "JSON 하나만 답하세요: "
         "{\"summary\":\"한 문장\",\"risk_level\":\"low|medium|high|unknown\","
         "\"visible_people\":\"none|one|multiple|unknown\","
-        "\"visible_risks\":[\"fire\",\"smoke\",\"heat_source\",\"none\"],"
+        "\"visible_risks\":[\"fire\",\"smoke\",\"unsafe_posture\",\"none\"],"
+        "\"hazard_material\":\"위험물명 또는 none\","
         "\"evacuation_route\":\"대피 경로 또는 unknown\","
         "\"hazard_warning\":\"위험물 경고 또는 none\","
+        "\"hazard_specific_action\":\"위험물별 대처 한 문장\","
         "\"recommended_action\":\"조치 한 문장\"}\n"
         f"카메라={camera_text}\n"
+        f"등록위험물={hazard_type}\n"
         f"이벤트={trigger_text}\n"
         f"YOLO={yolo_text}"
     )
     return _limit_text(prompt, max_chars)
+
+
+def _extract_hazard_type(camera: dict, trigger: dict) -> str:
+    if isinstance(trigger, dict):
+        prediction = trigger.get("prediction")
+        if isinstance(prediction, dict) and prediction.get("hazard_type"):
+            return str(prediction.get("hazard_type"))
+        if trigger.get("hazard_type"):
+            return str(trigger.get("hazard_type"))
+    return str(camera.get("hazard_type") or "none")
 
 
 def _is_prompt_too_long_error(exc: Exception) -> bool:
