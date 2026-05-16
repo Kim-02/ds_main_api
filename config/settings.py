@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     camera_vlm_request_timeout_seconds: int = 30
     camera_vlm_prompt_max_chars: int = 2400
     camera_vlm_retry_prompt_max_chars: int = 1100
-    camera_vlm_max_tokens: int = 256
+    camera_vlm_max_tokens: int = 384
     rest_forced_rest_work_minutes: int = 120
     rest_default_age: int = 40
     rest_default_gender: int = 1

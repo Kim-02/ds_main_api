@@ -578,10 +578,12 @@ def _format_yolo_context_for_prompt(yolo_context: dict | None) -> str:
         "generated_at": public.get("generated_at"),
         "normalized_text_length": public.get("normalized_text_length"),
     }
+    detection_summary = public.get("detection_summary") or {}
     text = str(yolo_context.get("normalized_text") or "")
     max_chars = int(getattr(settings, "cctv_vlm_yolo_context_prompt_max_chars", 2600) or 2600)
     return (
         f"YOLO정규화메타={json.dumps(metadata, ensure_ascii=False, default=str)}\n"
+        f"YOLO탐지요약={json.dumps(detection_summary, ensure_ascii=False, default=str)}\n"
         "YOLO정규화텍스트=\n"
         f"{_limit_text(text, max_chars)}"
     )

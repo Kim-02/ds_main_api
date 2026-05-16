@@ -31,6 +31,9 @@ def make_hazard_alert_ws_payload(
     hazard_specific_action: str = "",
     evacuation_route: str = "",
     abnormal_behavior: str = "",
+    detection_info: dict | None = None,
+    person_movement: dict | None = None,
+    environment_detections: dict | None = None,
 ) -> dict:
     """앱의 HazardAlert 모델과 1:1 매핑되는 WebSocket 알림 payload를 반환한다."""
     color_map = {"danger": "red", "warning": "orange", "info": "yellow"}
@@ -66,6 +69,9 @@ def make_hazard_alert_ws_payload(
         "hazard_specific_action": hazard_specific_action,
         "evacuation_route": evacuation_route,
         "abnormal_behavior": abnormal_behavior,
+        "detection_info": detection_info or {},
+        "person_movement": person_movement or {},
+        "environment_detections": environment_detections or {},
     }
 
 
@@ -104,6 +110,7 @@ def extract_vlm_text(result: Any) -> str:
             "hazard_specific_action",
             "evacuation_route",
             "abnormal_behavior",
+            "detection_text",
             "recommended_action",
             "situation",
             "evidence",
