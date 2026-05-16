@@ -241,6 +241,7 @@ async def lifespan(app: FastAPI):
         db_handler=db,
         loop=main_loop,
         broadcast_fn=ws_manager.broadcast,
+        mqtt_alert_fn=mqtt_sensor_svc.publish_hazard_alert_to_space_watches,
     )
     app.state.temperature_camera_vlm_manager = temperature_camera_vlm_manager
     temperature_scheduler.start()

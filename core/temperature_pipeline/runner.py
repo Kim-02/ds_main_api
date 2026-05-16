@@ -37,12 +37,14 @@ class TemperatureCameraVlmManager:
         *,
         loop=None,
         broadcast_fn: Optional[Callable[[dict], Any]] = None,
+        mqtt_alert_fn: Optional[Callable[..., Any]] = None,
         session_seconds: int = DEFAULT_SESSION_SECONDS,
         analysis_interval_seconds: int = DEFAULT_ANALYSIS_INTERVAL_SECONDS,
     ):
         self._db_handler = db_handler
         self._loop = loop
         self._broadcast_fn = broadcast_fn
+        self._mqtt_alert_fn = mqtt_alert_fn  # callable: publish_hazard_alert_to_space_watches
         self.session_seconds = session_seconds
         self.analysis_interval_seconds = analysis_interval_seconds
         self._sessions: dict[int, WatchCameraVlmSession] = {}
@@ -226,6 +228,24 @@ class TemperatureCameraVlmManager:
             "[VLM_ALERT] broadcast event_id=%s space_id=%s level=%s",
             event_id, space_id, level,
         )
+
+        # 3. 워치 MQTT publish (warning / danger / emergency만 전송)
+        if self._mqtt_alert_fn is not None and level in {"warning", "danger", "emergency"} and space_id is not None:
+            try:
+                dur = {"warning": 3000, "danger": 5000, "emergency": 8000}.get(level, 5000)
+                rst = {"warning": 15000, "danger": 20000, "emergency": 30000}.get(level, 15000)
+                self._mqtt_alert_fn(
+                    space_id,
+                    event_id=event_id,
+                    level=level,
+                    title=title,
+                    message=message_text,
+                    vibration=True,
+                    duration_ms=dur,
+                    reset_after_ms=rst,
+                )
+            except Exception as exc:
+                logger.exception("[VLM_ALERT] 워치 MQTT publish 실패: %s", exc)
 
     def _save_alert_to_db(
         self,
@@ -455,11 +475,12 @@ class TemperaturePipelineScheduler:
         }
 
 
-def build_temperature_pipeline_from_settings(db_handler, *, loop=None, broadcast_fn=None):
+def build_temperature_pipeline_from_settings(db_handler, *, loop=None, broadcast_fn=None, mqtt_alert_fn=None):
     manager = TemperatureCameraVlmManager(
         db_handler=db_handler,
         loop=loop,
         broadcast_fn=broadcast_fn,
+        mqtt_alert_fn=mqtt_alert_fn,
         session_seconds=int(getattr(settings, "temperature_vlm_session_seconds", DEFAULT_SESSION_SECONDS)),
         analysis_interval_seconds=int(
             getattr(settings, "temperature_vlm_analysis_interval_seconds", DEFAULT_ANALYSIS_INTERVAL_SECONDS)

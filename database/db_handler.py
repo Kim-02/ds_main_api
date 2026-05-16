@@ -2537,6 +2537,30 @@ class DatabaseHandler:
             logging.error("get_recent_alerts_by_space_id 오류: %s", e)
             return []
 
+    def get_watch_sensor_ids_by_space_id(self, space_id: int) -> list[str]:
+        """space_id 기준 워치/밴드 타입 sensor_id 목록 반환."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT sensor_id
+                        FROM sensor
+                        WHERE space_id = %s
+                          AND sensor_id IS NOT NULL
+                          AND (
+                            LOWER(sensor_type) LIKE %s
+                            OR LOWER(sensor_type) LIKE %s
+                            OR LOWER(sensor_type) LIKE %s
+                          )
+                        """,
+                        (space_id, "%heart%", "%watch%", "%band%"),
+                    )
+                    return [row["sensor_id"] for row in cursor.fetchall() if row.get("sensor_id")]
+        except Exception as e:
+            logging.error("get_watch_sensor_ids_by_space_id 오류: %s", e)
+            return []
+
     def mark_alert_as_read(self, event_id: int, space_id: int | None = None) -> bool:
         """alert_event 테이블의 is_read를 1로 업데이트한다."""
         try:

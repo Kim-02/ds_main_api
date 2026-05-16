@@ -263,3 +263,70 @@ class MqttSensorService:
             }),
         )
         logger.info("[MQTT Sensor] alert 발행 sensor_id=%s", sensor_id)
+
+    def publish_hazard_alert(
+        self,
+        sensor_id: str,
+        *,
+        event_id: int | None = None,
+        level: str = "warning",
+        title: str = "위험 알림",
+        message: str = "위험 상황이 감지되었습니다.",
+        vibration: bool = True,
+        duration_ms: int = 5000,
+        reset_after_ms: int = 15000,
+    ) -> None:
+        """워치 앱이 처리하는 hazard_alert 타입 payload를 MQTT로 publish한다."""
+        _color = {"danger": "red", "warning": "orange", "emergency": "dark_red"}.get(level, "yellow")
+        topic = f"sensors/{sensor_id}/alert"
+        payload = json.dumps({
+            "type": "hazard_alert",
+            "event_id": event_id,
+            "level": level,
+            "title": title,
+            "message": message,
+            "color": _color,
+            "vibration": vibration,
+            "duration_ms": duration_ms,
+            "reset_after_ms": reset_after_ms,
+        }, ensure_ascii=False)
+        try:
+            self.client.publish(topic, payload, qos=1)
+            logger.info(
+                "[WATCH_ALERT] publish topic=%s level=%s event_id=%s",
+                topic, level, event_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[WATCH_ALERT] publish failed sensor_id=%s error=%s",
+                sensor_id, exc,
+            )
+
+    def publish_hazard_alert_to_space_watches(
+        self,
+        space_id: int,
+        *,
+        event_id: int | None = None,
+        level: str = "warning",
+        title: str = "위험 알림",
+        message: str = "위험 상황이 감지되었습니다.",
+        vibration: bool = True,
+        duration_ms: int = 5000,
+        reset_after_ms: int = 15000,
+    ) -> None:
+        """space_id 기준 모든 워치/밴드 센서에 hazard_alert를 전송한다."""
+        sensor_ids = self.db_handler.get_watch_sensor_ids_by_space_id(space_id)
+        if not sensor_ids:
+            logger.info("[WATCH_ALERT] space_id=%s에 워치 센서 없음", space_id)
+            return
+        for sensor_id in sensor_ids:
+            self.publish_hazard_alert(
+                sensor_id,
+                event_id=event_id,
+                level=level,
+                title=title,
+                message=message,
+                vibration=vibration,
+                duration_ms=duration_ms,
+                reset_after_ms=reset_after_ms,
+            )
