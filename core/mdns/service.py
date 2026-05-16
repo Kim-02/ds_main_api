@@ -1,11 +1,14 @@
 """mDNS 센서 탐색 서비스 — _onsafe-sensor._tcp.local. 스캔."""
 import asyncio
+import logging
 import socket
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 from zeroconf import ServiceBrowser, ServiceStateChange
 from zeroconf.asyncio import AsyncZeroconf
+
+logger = logging.getLogger(__name__)
 
 
 class MdnsSensorService:
@@ -29,14 +32,14 @@ class MdnsSensorService:
             handlers=[self._on_service_state_change],
         )
         self._running = True
-        print("[mDNS Sensor] 스캐너 시작")
+        logger.info("[mDNS Sensor] 스캐너 시작")
 
     async def stop(self):
         self._running = False
         if self.aiozc:
             await self.aiozc.async_close()
             self.aiozc = None
-        print("[mDNS Sensor] 스캐너 중단")
+        logger.info("[mDNS Sensor] 스캐너 중단")
 
     def get_discovered_sensors(self) -> list:
         return list(self.discovered_sensors.values())
@@ -91,14 +94,14 @@ class MdnsSensorService:
                 "is_online": True,
                 "last_seen_at": datetime.now(),
             }
-            print(f"[mDNS Sensor] 발견/갱신: {sensor_id} @ {ip_addr}")
+            logger.info("[mDNS Sensor] 발견/갱신: %s @ %s", sensor_id, ip_addr)
         except Exception as e:
-            print(f"[mDNS Sensor] upsert 오류: {e}")
+            logger.error("[mDNS Sensor] upsert 오류: %s", e)
 
     async def _handle_removed(self, name: str):
         for sensor_id, sensor in self.discovered_sensors.items():
             if sensor.get("mdns_hostname") == name.rstrip("."):
                 self.discovered_sensors[sensor_id]["is_online"] = False
                 self.discovered_sensors[sensor_id]["last_seen_at"] = datetime.now()
-                print(f"[mDNS Sensor] 오프라인: {sensor_id}")
+                logger.info("[mDNS Sensor] 오프라인: %s", sensor_id)
                 break

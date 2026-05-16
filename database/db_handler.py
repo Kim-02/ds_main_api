@@ -530,7 +530,7 @@ class DatabaseHandler:
                     cursor.execute("SELECT * FROM jetson ORDER BY jetson_id LIMIT 1")
                    
                     jetson = cursor.fetchone()
-                    print(jetson)
+                    logging.debug("register_jetson_connection jetson=%s", jetson)
                     if not jetson:
                         return None
 

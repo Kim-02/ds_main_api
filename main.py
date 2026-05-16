@@ -7,10 +7,72 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 
 from config import settings
 
-logging.basicConfig(
-    level=logging.DEBUG if settings.debug else logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+
+class RuntimeLogFilter(logging.Filter):
+    """Jetson 현장 테스트용 로그 필터.
+
+    LOG_PROFILE=vlm_focus 일 때는 VLM 흐름, MQTT 센서 수신값, 전체 ERROR만 콘솔에 남긴다.
+    """
+
+    SENSOR_DATA_MARKERS = (
+        "온습도 업데이트",
+        "심박 업데이트",
+    )
+    VLM_LOGGER_PREFIXES = (
+        "ai.vlm",
+        "core.cctv_vlm_context",
+        "core.watch_pipeline.camera_vlm",
+    )
+    VLM_MESSAGE_MARKERS = (
+        "VLM",
+        "vLLM",
+        "VLLM",
+        "[VLM TEXT]",
+        "TemperatureVLM",
+        "TemperatureVLMDebug",
+        "WatchCameraVLM",
+        "autoregressive VLM",
+    )
+
+    def __init__(self, profile: str):
+        super().__init__()
+        self.profile = (profile or "default").strip().lower()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.profile not in {"vlm_focus", "vlm-only", "vlm_only"}:
+            return True
+
+        if record.levelno >= logging.ERROR:
+            return True
+
+        message = record.getMessage()
+
+        if record.name == "core.mqtt.sensor_service":
+            return any(marker in message for marker in self.SENSOR_DATA_MARKERS)
+
+        if record.name.startswith(self.VLM_LOGGER_PREFIXES):
+            return True
+
+        return any(marker in message for marker in self.VLM_MESSAGE_MARKERS)
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if settings.debug else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True,
+    )
+
+    runtime_filter = RuntimeLogFilter(settings.log_profile)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(runtime_filter)
+
+    if runtime_filter.profile in {"vlm_focus", "vlm-only", "vlm_only"}:
+        for logger_name in ("uvicorn.access", "uvicorn.error", "httpx"):
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
+
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

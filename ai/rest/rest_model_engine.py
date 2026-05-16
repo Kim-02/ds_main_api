@@ -1,9 +1,12 @@
+import logging
 from typing import Dict, List
 
 import joblib
 import pandas as pd
 
 from .rest_calculator import RestCalculator, WorkerRawInput
+
+logger = logging.getLogger(__name__)
 
 
 FINAL_FORCE_REST = "반드시 휴식"
@@ -26,7 +29,7 @@ class RestModelEngine:
         self.label_name_map: Dict[int, str] = payload["label_name_map"]
         self.forced_rest_work_min = forced_rest_work_min
         self.worker_baseline_map: Dict[str, float] = {}
-        print("[RestModelEngine] 모델 로드 완료")
+        logger.info("[RestModelEngine] 모델 로드 완료")
 
     def reset_worker(self, worker_id: str) -> None:
         self.worker_baseline_map.pop(worker_id, None)

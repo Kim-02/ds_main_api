@@ -124,6 +124,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     debug: bool = False
+    log_profile: str = "vlm_focus"
 
     @field_validator("debug", mode="before")
     @classmethod
