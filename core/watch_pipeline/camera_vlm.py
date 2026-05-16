@@ -75,7 +75,8 @@ class WatchCameraVlmManager:
             logger.warning("[WatchCameraVLM] watch sensor has no space_id sensor_id=%s", watch_sensor_id)
             return {"started": 0, "extended": 0, "space_id": None, "cameras": []}
 
-        cameras = self._db_handler.get_cameras_by_space_id(int(space_id))
+        cameras = list(self._db_handler.get_cameras_by_space_id(int(space_id)))
+        cameras.extend(_get_video_runtime_cameras_by_space_id(int(space_id)))
         started = 0
         extended = 0
         camera_statuses = []
@@ -511,6 +512,10 @@ class WatchCameraVlmSession:
 
 
 def _build_rtsp_url(camera: dict) -> str:
+    direct_source = camera.get("rtsp_url") or camera.get("video_path")
+    if direct_source:
+        return str(direct_source)
+
     path = settings.fire_pipeline_rtsp_path
     if not path.startswith("/"):
         path = f"/{path}"
@@ -518,6 +523,14 @@ def _build_rtsp_url(camera: dict) -> str:
     password = quote(str(camera.get("camera_pw") or ""), safe="")
     ip_address = camera.get("ip_address")
     return f"rtsp://{username}:{password}@{ip_address}{path}"
+
+
+def _get_video_runtime_cameras_by_space_id(space_id: int) -> list[dict]:
+    try:
+        from cctv.api.service import get_video_runtime_cameras_by_space_id
+        return get_video_runtime_cameras_by_space_id(space_id)
+    except Exception:
+        return []
 
 
 def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | None) -> str:

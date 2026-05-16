@@ -29,8 +29,10 @@ def init_manager(loop: asyncio.AbstractEventLoop, broadcast_fn: Callable) -> Non
     logger.info("FirePipelineManager 초기화 완료")
 
 
-def _make_on_result(camera_id: int) -> Callable[[str], None]:
+def _make_on_result(camera_id: int, metadata: dict | None = None) -> Callable[[str], None]:
     """파이프라인 결과를 메모리에 저장하고 WebSocket으로 전송하는 콜백 생성."""
+    metadata = dict(metadata or {})
+
     def on_result(answer: str) -> None:
         with _pipelines_lock:
             entry = _pipelines.get(camera_id)
@@ -44,6 +46,7 @@ def _make_on_result(camera_id: int) -> Callable[[str], None]:
                     "CCTV 화재/연기 autoregressive VLM 분석 완료",
                     answer,
                     camera_id=camera_id,
+                    **metadata,
                 )),
                 _loop,
             )
@@ -62,7 +65,12 @@ def _run_pipeline(camera_id: int, pipeline) -> None:
         logger.exception("Fire pipeline crashed for camera %s", camera_id)
 
 
-def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
+def start_pipeline(
+    camera_id: int,
+    rtsp_url: str,
+    model_path: str = "",
+    metadata: dict | None = None,
+) -> bool:
     """카메라 ID에 대한 fire pipeline 시작.
 
     이미 실행 중이면 False 반환.
@@ -79,6 +87,7 @@ def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
             "latest_result": "",
             "latest_error": "",
             "starting": True,
+            "metadata": dict(metadata or {}),
         }
 
     try:
@@ -93,7 +102,7 @@ def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
     try:
         config = FirePipelineConfig(rtsp_url=rtsp_url, model_path=model_path)
         config.camera_id = camera_id
-        on_result = _make_on_result(camera_id)
+        on_result = _make_on_result(camera_id, metadata)
         pipeline = ExportFinalPipeline(config, on_result=on_result)
 
         thread = threading.Thread(
@@ -116,6 +125,7 @@ def start_pipeline(camera_id: int, rtsp_url: str, model_path: str = "") -> bool:
             "latest_result": "",
             "latest_error": "",
             "starting": False,
+            "metadata": dict(metadata or {}),
         }
     logger.info("Fire pipeline started for camera %s (rtsp=%s)", camera_id, rtsp_url)
     return True
@@ -151,6 +161,7 @@ def get_status(camera_id: int) -> dict:
         "starting": bool(entry.get("starting")),
         "latest_result": entry["latest_result"],
         "latest_error": entry.get("latest_error", ""),
+        "metadata": entry.get("metadata", {}),
     }
 
 

@@ -3,17 +3,21 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
+import zlib
 
 from fastapi import HTTPException, status
 
 from config import settings
 from database.db_handler import DatabaseHandler
 
-from .schemas import AppCameraRegisterReq, CameraCreate, CameraUpdate
+from .schemas import AppCameraRegisterReq, CameraCreate, CameraUpdate, VideoPipelineStartReq
 
 logger = logging.getLogger(__name__)
+
+_VIDEO_RUNTIME_REGISTRY: dict[int, dict[str, Any]] = {}
 
 
 def build_rtsp_url(
@@ -102,6 +106,102 @@ def start_registered_camera_runtime_components(
     return result
 
 
+def start_video_pipeline_from_file(data: VideoPipelineStartReq) -> dict:
+    """프로젝트 실행 디렉터리의 영상 파일을 space_id에 연결된 가상 CCTV로 실행한다."""
+    video_path = _resolve_local_video(data.video_name)
+    space_id = int(data.space_id or 1)
+    camera_id = int(data.camera_id) if data.camera_id is not None else _virtual_camera_id(video_path, space_id)
+
+    if data.restart:
+        _stop_runtime_components(camera_id)
+
+    camera_meta = {
+        "camera_id": camera_id,
+        "sensor_id": f"video-{camera_id}",
+        "space_id": space_id,
+        "space_name": None,
+        "sen_name": f"VIDEO-{video_path.name}",
+        "video_name": video_path.name,
+        "video_path": str(video_path),
+        "source_type": "video_file",
+    }
+    _VIDEO_RUNTIME_REGISTRY[camera_id] = camera_meta
+
+    _start_runtime_components(
+        cam_id=camera_id,
+        rtsp_url=str(video_path),
+        process_id=space_id,
+        camera_meta=camera_meta,
+    )
+
+    logger.info(
+        "Video CCTV runtime started camera_id=%s space_id=%s video=%s",
+        camera_id,
+        space_id,
+        video_path,
+    )
+    return _video_pipeline_response("started", camera_id, video_path=video_path, space_id=space_id)
+
+
+def stop_video_pipeline(camera_id: int) -> dict:
+    meta = _VIDEO_RUNTIME_REGISTRY.get(camera_id)
+    if not meta:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="실행 중인 영상 파이프라인이 없습니다.",
+        )
+
+    video_path = Path(meta.get("video_path"))
+    space_id = int(meta.get("space_id") or 1)
+
+    _stop_runtime_components(camera_id)
+    _VIDEO_RUNTIME_REGISTRY.pop(camera_id, None)
+    logger.info("Video CCTV runtime stopped camera_id=%s", camera_id)
+    return _video_pipeline_response("stopped", camera_id, video_path=video_path, space_id=space_id)
+
+
+def get_video_pipeline_status(camera_id: int) -> dict:
+    meta = _VIDEO_RUNTIME_REGISTRY.get(camera_id)
+    if not meta:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="실행 중인 영상 파이프라인이 없습니다.",
+        )
+
+    return _video_pipeline_response(
+        "running",
+        camera_id,
+        video_path=Path(meta["video_path"]),
+        space_id=int(meta.get("space_id") or 1),
+    )
+
+
+def get_video_runtime_cameras_by_space_id(space_id: int) -> list[dict]:
+    """온습도/워치 트리거에서 같은 space_id의 테스트 영상 카메라를 함께 사용한다."""
+    cameras = []
+    for camera_id, meta in list(_VIDEO_RUNTIME_REGISTRY.items()):
+        if int(meta.get("space_id") or -1) != int(space_id):
+            continue
+        cameras.append({
+            "sen_id": camera_id,
+            "sensor_id": meta.get("sensor_id") or f"video-{camera_id}",
+            "sen_name": meta.get("sen_name") or f"VIDEO-{meta.get('video_name')}",
+            "space_id": int(meta.get("space_id") or space_id),
+            "space_name": meta.get("space_name"),
+            "hazard_type": meta.get("hazard_type"),
+            "is_hazard": bool(meta.get("is_hazard", False)),
+            "ip_address": meta.get("video_path") or "",
+            "health": 1,
+            "is_online": 1,
+            "camera_id": "video",
+            "camera_pw": "",
+            "rtsp_url": meta.get("video_path") or "",
+            "video_path": meta.get("video_path") or "",
+            "source_type": "video_file",
+        })
+    return cameras
+
+
 def get_camera(
     db: DatabaseHandler,
     sensor_id: int,
@@ -119,6 +219,7 @@ def _start_runtime_components(
     cam_id: int,
     rtsp_url: str,
     process_id: int,
+    camera_meta: dict[str, Any] | None = None,
 ) -> None:
     """카메라 등록/복구 후 RTSP reader, 10초 버퍼, fire pipeline을 시작한다."""
     try:
@@ -146,7 +247,7 @@ def _start_runtime_components(
     if settings.fire_pipeline_enabled:
         try:
             from cctv.fire_pipeline import manager as fire_manager
-            fire_manager.start_pipeline(cam_id, rtsp_url)
+            fire_manager.start_pipeline(cam_id, rtsp_url, metadata=camera_meta)
         except ImportError:
             logger.warning("fire_pipeline 모듈 없음 — 파이프라인 건너뜀 (cam_id=%s)", cam_id)
         except Exception:
@@ -424,6 +525,86 @@ def stop_fire_pipeline(
         "status": "stopped",
         "sensor_id": sensor_id,
         "camera_id": sensor_id,
+    }
+
+
+def _resolve_local_video(video_name: str) -> Path:
+    """서버 실행 디렉터리에 있는 영상 파일명을 안전하게 해석한다."""
+    name = str(video_name or "").strip()
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="video_name이 필요합니다.",
+        )
+
+    if Path(name).name != name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="video_name에는 경로를 넣을 수 없습니다. 서버 실행 디렉터리의 파일명만 보내주세요.",
+        )
+
+    allowed_exts = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm"}
+    path = (Path.cwd() / name).resolve()
+    cwd = Path.cwd().resolve()
+    if path.parent != cwd:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="서버 실행 디렉터리 밖의 파일은 사용할 수 없습니다.",
+        )
+    if path.suffix.lower() not in allowed_exts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"지원하지 않는 영상 확장자입니다: {path.suffix}",
+        )
+    if not path.exists() or not path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"영상 파일을 찾을 수 없습니다: {name}",
+        )
+    return path
+
+
+def _virtual_camera_id(video_path: Path, space_id: int) -> int:
+    key = f"{space_id}:{video_path.name}".encode("utf-8")
+    # MariaDB auto_increment sen_id와 충돌 가능성을 낮추기 위해 높은 양수 대역을 사용한다.
+    return 900_000_000 + (zlib.crc32(key) % 100_000_000)
+
+
+def _video_pipeline_response(
+    status_text: str,
+    camera_id: int,
+    *,
+    video_path: Path,
+    space_id: int,
+) -> dict:
+    try:
+        from cctv.rtsp import get_reader_status
+        reader_status = get_reader_status(camera_id)
+    except Exception:
+        reader_status = {"camera_id": camera_id, "running": False, "latest_error": "status_unavailable"}
+
+    try:
+        from cctv.buffer import get_buffer_status
+        buffer_status = get_buffer_status(camera_id)
+    except Exception:
+        buffer_status = {"camera_id": camera_id, "running": False, "latest_error": "status_unavailable"}
+
+    try:
+        from cctv.fire_pipeline import manager as fire_manager
+        fire_status = fire_manager.get_status(camera_id)
+    except Exception:
+        fire_status = {"running": False, "latest_result": "", "latest_error": "status_unavailable"}
+
+    video_name = video_path.name if str(video_path) else ""
+    return {
+        "status": status_text,
+        "camera_id": camera_id,
+        "space_id": int(space_id),
+        "video_name": video_name,
+        "video_path": str(video_path) if str(video_path) else "",
+        "rtsp_reader": reader_status,
+        "frame_buffer": buffer_status,
+        "fire_pipeline": fire_status,
     }
 
 

@@ -85,7 +85,8 @@ class TemperatureCameraVlmManager:
             logger.warning("[TemperatureVLM] temperature sensor has no space_id sensor_id=%s", sensor_id)
             return {"started": 0, "extended": 0, "space_id": None, "cameras": []}
 
-        cameras = self._db_handler.get_cameras_by_space_id(int(space_id))
+        cameras = list(self._db_handler.get_cameras_by_space_id(int(space_id)))
+        cameras.extend(_get_video_runtime_cameras_by_space_id(int(space_id)))
         started = 0
         extended = 0
         camera_statuses = []
@@ -576,7 +577,8 @@ def run_temperature_camera_vlm_once(
             "cameras": [],
         }
 
-    cameras = db_handler.get_cameras_by_space_id(int(space_id))
+    cameras = list(db_handler.get_cameras_by_space_id(int(space_id)))
+    cameras.extend(_get_video_runtime_cameras_by_space_id(int(space_id)))
     if camera_sen_id is not None:
         cameras = [camera for camera in cameras if int(camera.get("sen_id") or -1) == int(camera_sen_id)]
 
@@ -724,6 +726,14 @@ def _json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _get_video_runtime_cameras_by_space_id(space_id: int) -> list[dict]:
+    try:
+        from cctv.api.service import get_video_runtime_cameras_by_space_id
+        return get_video_runtime_cameras_by_space_id(space_id)
+    except Exception:
+        return []
 
 
 def _normalize_temperature_vlm_result(
