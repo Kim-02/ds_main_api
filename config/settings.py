@@ -34,10 +34,6 @@ class Settings(BaseSettings):
     vllm_progress_path: str = "logs/vllm_startup_progress.json"
     vlm_timeshare_max_concurrent: int = 2
     vlm_timeshare_cooldown_seconds: float = 0.1
-    vlm_preview_enabled: bool = True
-    vlm_preview_window_name: str = "autoregressive VLM preview"
-    vlm_preview_max_width: int = 960
-    vlm_preview_max_height: int = 720
 
     # Camera / YOLO
     frame_buffer_minutes: int = 10

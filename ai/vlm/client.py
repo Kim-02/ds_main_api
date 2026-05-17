@@ -5,7 +5,6 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from ai.vlm.preview import vlm_preview
 from ai.vlm.timeshare import run_vlm_timeshare
 
 
@@ -87,35 +86,34 @@ class OpenAiCompatibleVlm:
         label = _make_timeshare_label(self.model, image_path, stream)
 
         def _request():
-            with vlm_preview(image_path, label):
-                content = make_content(prompt, image_path)
+            content = make_content(prompt, image_path)
 
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": content}],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    stream=stream,
-                )
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=stream,
+            )
 
-                if not stream:
-                    text = response.choices[0].message.content
-                    if on_text is not None:
-                        on_text(text)
-                    return text
-
-                text = ""
-                for chunk in response:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if delta.content is None:
-                        continue
-                    text += delta.content
-                    if on_text is not None:
-                        on_text(text)
-
+            if not stream:
+                text = response.choices[0].message.content
+                if on_text is not None:
+                    on_text(text)
                 return text
+
+            text = ""
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content is None:
+                    continue
+                text += delta.content
+                if on_text is not None:
+                    on_text(text)
+
+            return text
 
         return run_vlm_timeshare(label, _request)
 
