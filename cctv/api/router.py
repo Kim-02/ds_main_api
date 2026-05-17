@@ -230,15 +230,14 @@ def stream_camera_mjpeg(
     """기존 RTSP reader/frame buffer를 재사용해 MJPEG로 전송합니다.
 
     source=buffer (기본값): 이미 열려 있는 RtspReader/FrameBuffer의 프레임을 가져옵니다.
-      → RTSP 추가 연결 없음. 429 Stream Up To Limit 방지.
-    source=rtsp: RTSP를 새로 열어 스트리밍 (기존 reader가 없을 때만 사용).
-      → cv2.CAP_FFMPEG backend 명시.
+      → camera_info DB 조회 불필요. RTSP 추가 연결 없음. 429 방지.
+    source=rtsp: RTSP를 새로 열어 스트리밍. camera_info에서 자격증명 조회 필요.
     """
-    row = request.app.state.db.get_cctv_by_sen_id(sen_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="CCTV를 찾을 수 없습니다.")
-
     if source == "rtsp":
+        # RTSP fallback: 카메라 자격증명이 필요하므로 DB 조회
+        row = request.app.state.db.get_cctv_by_sen_id(sen_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="CCTV 정보를 찾을 수 없습니다. (camera_info 없음)")
         rtsp_url = service.build_rtsp_url(
             ip_address=str(row["ip_address"]),
             username=str(row["camera_id"]),
@@ -246,6 +245,8 @@ def stream_camera_mjpeg(
         )
         gen = _generate_from_rtsp_fallback(sen_id, rtsp_url)
     else:
+        # buffer mode: DB 조회 없이 기존 reader/buffer에서 직접 프레임 획득
+        # camera_info가 없어도 RtspReader가 실행 중이면 스트리밍 가능
         gen = _generate_from_existing_reader(sen_id)
 
     return StreamingResponse(
