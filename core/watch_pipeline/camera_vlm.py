@@ -325,13 +325,13 @@ class WatchCameraVlmSession:
                         yolo_context=public_yolo_context(yolo_context),
                         status=self.status(),
                     )
+                    self.manager.publish_result(payload)
                     logger.info(
                         "[VLM TEXT] event_type=%s camera_sen_id=%s app_text=%s",
                         self.event_type,
                         self.camera.get("sen_id"),
                         payload.get("text") or payload.get("body") or "",
                     )
-                    self.manager.publish_result(payload)
                 except Exception as exc:
                     logger.exception(
                         "[WatchCameraVLM] analysis failed camera_sen_id=%s",
@@ -986,9 +986,11 @@ def _fallback_environment_vlm_result(
             "worker_name": None,
         },
         "visible_people": _visible_people_from_yolo(yolo_context),
-        "person_actions": ["unknown"],
-        "worker_location": "same_space_unknown",
-        "abnormal_behavior": "unknown",
+        "worker_movements": _detection_text_from_yolo(yolo_context),
+        "abnormal_behavior": "not_visible",
+        "field_status": "VLM 응답 오류로 현장 상태를 자동 확인하세요.",
+        "health_risk_summary": health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요",
+        "worker_risks": [],
         "visible_risks": _visible_risks_from_yolo(yolo_context),
         "environment_status": {
             "temperature_c": sample.get("temp"),

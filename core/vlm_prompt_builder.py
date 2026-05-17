@@ -41,8 +41,7 @@ def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | No
         "분석 명칭: autoregressive VLM.\n"
         "반드시 모든 응답 필드 값을 한국어로 작성하세요. 영어 사용 금지.\n"
         "산업 안전 안내만 작성, 의료 진단 금지. 가능성/주의/관리자 확인 표현을 사용하세요.\n"
-        "현재 CCTV 이미지 우선, YOLO 10초 정규화는 보조 근거. 보이지 않는 사람/객체/누출/화재를 확정하지 마세요.\n"
-        "등록 위험물은 공간 속성입니다. 화면에 누출/가스가 없으면 존재/부재를 단정하지 마세요.\n"
+        "현재 CCTV 이미지 우선, YOLO 10초 정규화는 보조 근거. 화면에 보이지 않는 것은 확정하지 마세요.\n"
         f"현재시각={datetime.now().isoformat(timespec='seconds')}\n"
         f"카메라={json_dumps(compact_camera_for_prompt(camera))}\n"
         f"{format_yolo_context_for_prompt(yolo_context)}\n"
@@ -54,9 +53,14 @@ def build_environment_health_prompt(camera: dict, trigger: dict, yolo_context: d
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "판단유형=environment\n"
-        "관점: 현장 단위 건강 주의 판단입니다. 아래 두 가지를 각각 분리해서 판단하세요.\n"
+        "관점: 현장 단위 건강 주의 판단입니다. 아래 세 가지를 각각 분리해서 판단하세요.\n"
         "① CCTV 영상 기반: 현재 현장 상태(field_status)와 작업자 동향(worker_movements)을 화면에서 직접 묘사하세요.\n"
         "② DB 건강 정보 기반: health_attention 데이터를 참고하여 작업자별 건강 위험(worker_risks)과 전체 요약(health_risk_summary)을 작성하세요.\n"
+        "③ [비틀거림·신체 이상 탐지] CCTV 이미지와 YOLO 10초 이력을 함께 보세요.\n"
+        "   - 이미지에서 자세 확인: 직립/기댐/쭈그림/쓰러짐\n"
+        "   - person_movement.delta가 크거나 방향이 불규칙하면 staggering 가능성\n"
+        "   - abnormal_behavior에 반드시 하나를 채우세요: staggering|falling|slumping|crouching|leaning|normal|not_visible\n"
+        "   - staggering 또는 falling 탐지 시 risk_level을 최소 high로 올리고 recommended_actions 맨 앞에 '즉시 현장 확인' 추가\n"
         "특정 작업자에게 문제가 발생했다고 단정하지 마세요. 화면에 이상행동이 명확하지 않으면 '확인 필요'로 표현하세요.\n"
         "관리자가 즉시 행동할 수 있도록 recommended_actions를 구체적으로 작성하세요.\n"
         f"현장건강이벤트={json_dumps(context)}\n"
@@ -289,6 +293,7 @@ def _common_response_schema(*, target_type: str) -> str:
             "summary": "관리자용 한 줄 현장 요약",
             "field_status": "CCTV 기반 현장 상태 묘사",
             "worker_movements": "CCTV 기반 작업자 동향 묘사",
+            "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
             "health_risk_summary": "DB 기반 전체 건강 위험 요약",
             "worker_risks": [
                 {"worker_name": "작업자명 또는 익명", "risk_factors": ["위험요인"], "note": "비고"}

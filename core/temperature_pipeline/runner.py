@@ -191,6 +191,9 @@ class TemperatureCameraVlmManager:
         if isinstance(result, dict):
             message_text = _compose_temperature_alert_message(result)
 
+        payload["text"] = message_text
+        payload["body"] = message_text
+
         logger.info(
             "[VLM TEXT] event_type=temperature_camera_vlm camera_sen_id=%s app_text=%s",
             camera.get("sen_id"),
@@ -845,6 +848,19 @@ def _normalize_temperature_vlm_result(
     if not isinstance(normalized.get("recommended_actions"), list):
         normalized["recommended_actions"] = []
 
+    normalized.setdefault("abnormal_behavior", "not_visible")
+
+    # 비틀거림·낙상 탐지 시 risk_level 강제 상향
+    abnormal = str(normalized.get("abnormal_behavior") or "").strip().lower()
+    if abnormal in {"staggering", "falling"}:
+        current_rank = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        if current_rank.get(str(normalized.get("risk_level") or "").lower(), 0) < 3:
+            normalized["risk_level"] = "high"
+        actions = normalized["recommended_actions"]
+        urgent = "즉시 현장 확인 — 작업자 비틀거림·낙상 가능성이 감지되었습니다."
+        if urgent not in actions:
+            normalized["recommended_actions"] = [urgent] + actions
+
     return normalized
 
 
@@ -855,12 +871,24 @@ def _compose_temperature_alert_message(result: dict) -> str:
     worker_movements = str(result.get("worker_movements") or "").strip()
     health_risk_summary = str(result.get("health_risk_summary") or "").strip()
     recommended_actions = result.get("recommended_actions")
+    abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
+
+    # 비틀거림·낙상은 맨 앞에 강조
+    if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
+        label = {
+            "staggering": "비틀거림 감지",
+            "falling": "낙상 감지",
+            "slumping": "신체 축 처짐 감지",
+            "leaning": "기댐 감지",
+            "crouching": "쭈그림 감지",
+        }.get(abnormal, abnormal)
+        parts.append(f"[행동 이상] {label}")
 
     if summary:
         parts.append(f"[현장] {summary}")
     if field_status and field_status != summary:
         parts.append(f"현장 상태: {field_status}")
-    if worker_movements and worker_movements not in {"none", "unknown"}:
+    if worker_movements and worker_movements not in {"none", "unknown", "not_visible"}:
         parts.append(f"작업자 동향: {worker_movements}")
     if health_risk_summary:
         parts.append(f"건강 위험: {health_risk_summary}")
