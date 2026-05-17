@@ -7,12 +7,18 @@ from typing import Any, Dict, Optional
 class EnvironmentSample:
     temp_c: float
     humid: float
+    sensor_id: str = ""
+    sensor_name: str = ""
+    space_id: Optional[int] = None
+    space_name: str = ""
 
 
 @dataclass(frozen=True)
 class WatchSample:
     hr: float
     baseline_hr: Optional[float] = None
+    sensor_id: str = ""
+    sensor_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,12 @@ class WorkerProfile:
     hypertension: int
     other_disease: int
     target_topic: str
+    baseline_hr: Optional[float] = None
+    name: str = ""
+    sensor_id: str = ""
+    sensor_name: str = ""
+    space_id: Optional[int] = None
+    space_name: str = ""
 
 
 @dataclass(frozen=True)

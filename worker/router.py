@@ -47,9 +47,44 @@ async def assign_heart_band_to_worker(dept_id: int, data: AssignHeartBandRequest
     return await service.assign_heart_band_to_worker(
         request=request,
         dept_id=dept_id,
-        sensor_id=data.sensor_id,
-        jetson_id=data.jetson_id,
-        interval_ms=data.interval_ms,
+        data=data,
+    )
+
+
+@router.post(
+    "/assign-heart-band",
+    response_model=AssignHeartBandResponse,
+    summary="앱 payload 기반 워치-작업자 등록 및 매핑",
+)
+async def assign_heart_band_to_worker_from_body(data: AssignHeartBandRequest, request: Request):
+    return await service.assign_heart_band_to_worker_from_body(
+        request=request,
+        data=data,
+    )
+
+
+@legacy_router.post(
+    "/workers/{dept_id}/assign-heart-band",
+    response_model=AssignHeartBandResponse,
+    summary="앱 호환 워치-작업자 등록 및 매핑",
+)
+async def legacy_assign_heart_band_to_worker(dept_id: int, data: AssignHeartBandRequest, request: Request):
+    return await service.assign_heart_band_to_worker(
+        request=request,
+        dept_id=dept_id,
+        data=data,
+    )
+
+
+@legacy_router.post(
+    "/workers/assign-heart-band",
+    response_model=AssignHeartBandResponse,
+    summary="앱 호환 payload 기반 워치-작업자 등록 및 매핑",
+)
+async def legacy_assign_heart_band_to_worker_from_body(data: AssignHeartBandRequest, request: Request):
+    return await service.assign_heart_band_to_worker_from_body(
+        request=request,
+        data=data,
     )
 
 

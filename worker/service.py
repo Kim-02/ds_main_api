@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
 
-from .schemas import WorkerCreate, WorkerUpdate
+from .schemas import AssignHeartBandRequest, WorkerCreate, WorkerUpdate
 
 
 def _row_to_out(row: dict | None) -> dict | None:
@@ -83,37 +83,62 @@ async def get_db_worker(request: Request, dept_id: int) -> dict:
 async def assign_heart_band_to_worker(
     request: Request,
     dept_id: int,
-    sensor_id: str,
-    jetson_id: int | None,
-    interval_ms: int,
+    data: AssignHeartBandRequest,
 ) -> dict:
     db_handler = request.app.state.db
     mdns_service = getattr(request.app.state, "mdns_sensor_service", None)
     mqtt_service = getattr(request.app.state, "mqtt_sensor_service", None)
 
-    if mdns_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="mDNS 센서 서비스가 app.state에 등록되어 있지 않습니다.",
-        )
     if mqtt_service is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="MQTT 센서 서비스가 app.state에 등록되어 있지 않습니다.",
         )
 
-    sensor_info = mdns_service.discovered_sensors.get(sensor_id)
-    if not sensor_info:
+    sensor_id = str(data.sensor_id or "").strip()
+    if not sensor_id:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="mDNS로 발견된 센서를 찾을 수 없습니다.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="sensor_id가 필요합니다.",
         )
+
+    sensor_info = await _resolve_heart_band_sensor_info(request, sensor_id, data)
     if sensor_info.get("sensor_type") != "heart_band":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="작업자 매핑은 heart_band 센서에만 허용됩니다.",
         )
 
+    worker = await run_in_threadpool(db_handler.get_worker_by_dept_id, dept_id)
+    if not worker:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 사번의 작업자를 찾을 수 없습니다.",
+        )
+    if worker.get("sensor_id") == sensor_id:
+        await run_in_threadpool(
+            mqtt_service.publish_register,
+            sensor_id,
+            _format_site_id(_resolve_jetson_id(data.jetson_id) or worker.get("jetson_id") or 1),
+            data.interval_ms,
+        )
+        watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
+        if watch_scheduler is not None:
+            watch_scheduler.register(sensor_id)
+        return {
+            "success": True,
+            "message": "이미 해당 작업자에게 연결된 워치입니다.",
+            "data": {
+                "sen_id": worker.get("sen_id"),
+                "sensor_id": sensor_id,
+                "sensor_type": worker.get("sensor_type") or "heart_band",
+                "dept_id": dept_id,
+                "worker_name": worker.get("name"),
+                "mqtt_topic": sensor_info.get("mqtt_topic"),
+            },
+        }
+
+    jetson_id = _resolve_jetson_id(data.jetson_id)
     if jetson_id is None:
         jetson = await run_in_threadpool(db_handler.get_first_jetson)
         if not jetson:
@@ -127,7 +152,12 @@ async def assign_heart_band_to_worker(
         result = await run_in_threadpool(
             db_handler.register_sensor_with_worker, sensor_info, jetson_id, dept_id
         )
-        await run_in_threadpool(mqtt_service.publish_register, sensor_id, str(jetson_id), interval_ms)
+        await run_in_threadpool(
+            mqtt_service.publish_register,
+            sensor_id,
+            _format_site_id(jetson_id),
+            data.interval_ms,
+        )
 
         watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
         if watch_scheduler is not None:
@@ -142,6 +172,95 @@ async def assign_heart_band_to_worker(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"워치 매핑 처리 중 오류가 발생했습니다: {e}",
         )
+
+
+async def assign_heart_band_to_worker_from_body(
+    request: Request,
+    data: AssignHeartBandRequest,
+) -> dict:
+    if data.dept_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="dept_id가 필요합니다.",
+        )
+    return await assign_heart_band_to_worker(request=request, dept_id=int(data.dept_id), data=data)
+
+
+async def _resolve_heart_band_sensor_info(
+    request: Request,
+    sensor_id: str,
+    data: AssignHeartBandRequest,
+) -> dict:
+    db_handler = request.app.state.db
+    mdns_service = getattr(request.app.state, "mdns_sensor_service", None)
+
+    sensor_info = None
+    if mdns_service is not None:
+        sensor_info = getattr(mdns_service, "discovered_sensors", {}).get(sensor_id)
+
+    if not sensor_info:
+        sensor_info = await run_in_threadpool(db_handler.get_sensor_by_sensor_id, sensor_id)
+
+    if not sensor_info:
+        sensor_info = {}
+
+    merged = dict(sensor_info)
+    request_data = data.model_dump(exclude_none=True)
+    for key in (
+        "sensor_id",
+        "sensor_type",
+        "sen_name",
+        "sen_locate",
+        "model",
+        "mqtt_topic",
+        "telemetry_topic",
+        "mqtt_base",
+        "mdns_hostname",
+        "ip_addr",
+        "is_online",
+    ):
+        value = request_data.get(key)
+        if value not in (None, ""):
+            merged[key] = value
+
+    sensor_type = str(merged.get("sensor_type") or "heart_band").lower()
+    if sensor_type in {"watch", "hb", "heart_rate", "heartbeat"}:
+        sensor_type = "heart_band"
+
+    merged["sensor_id"] = sensor_id
+    merged["sensor_type"] = sensor_type
+    if not merged.get("sen_name"):
+        merged["sen_name"] = sensor_id
+    if not merged.get("sen_locate"):
+        merged["sen_locate"] = "worker_wrist"
+    if not merged.get("model"):
+        merged["model"] = "Galaxy Watch"
+    if not merged.get("mqtt_base"):
+        merged["mqtt_base"] = f"sensors/{sensor_id}"
+    if not merged.get("mqtt_topic"):
+        merged["mqtt_topic"] = f"{merged['mqtt_base']}/telemetry"
+    if merged.get("is_online") is None:
+        merged["is_online"] = True
+    return merged
+
+
+def _resolve_jetson_id(value) -> int | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text.startswith("jetson-"):
+        text = text.split("-", 1)[1]
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _format_site_id(jetson_id: int | str) -> str:
+    try:
+        return f"jetson-{int(jetson_id):02d}"
+    except (TypeError, ValueError):
+        return str(jetson_id)
 
 
 async def unassign_worker_sensor(request: Request, dept_id: int) -> dict:

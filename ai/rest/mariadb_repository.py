@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -7,11 +8,14 @@ if TYPE_CHECKING:
 from .models import EnvironmentSample, WatchSample, WorkerProfile
 
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_AGE = 40
 DEFAULT_GENDER = 1
 DEFAULT_HEIGHT_CM = 170.0
 DEFAULT_WEIGHT_KG = 70.0
 DEFAULT_WORK_DURATION_MIN = 0
+TEMPERATURE_SENSOR_TYPES = ("temp_humidity", "temperature_humidity", "th", "temperature")
 
 
 class DatabaseHandlerRestDataRepository:
@@ -34,32 +38,67 @@ class DatabaseHandlerRestDataRepository:
         self.default_weight_kg = default_weight_kg
         self.default_work_duration_min = default_work_duration_min
 
-    def fetch_environment(self, _worker_id: str) -> EnvironmentSample:
+    def fetch_environment(self, worker_id: str) -> EnvironmentSample:
+        placeholders = ", ".join(["%s"] * len(TEMPERATURE_SENSOR_TYPES))
         row = self._fetch_one(
-            """
+            f"""
             SELECT
-                temp AS temp_c,
-                humid
-            FROM th_trans
-            ORDER BY time DESC
+                t.temp AS temp_c,
+                t.humid,
+                ts.sensor_id AS sensor_id,
+                ts.sen_name AS sensor_name,
+                ws.space_id AS space_id,
+                sp.space_name AS space_name
+            FROM worker w
+            JOIN sensor ws
+              ON w.sen_id = ws.sen_id
+            JOIN sensor ts
+              ON ts.space_id = ws.space_id
+             AND LOWER(ts.sensor_type) IN ({placeholders})
+            JOIN th_trans t
+              ON t.sen_id = ts.sen_id
+            LEFT JOIN ds_space sp
+              ON ws.space_id = sp.space_id
+            WHERE w.dept_id = %s
+            ORDER BY t.time DESC
             LIMIT 1
             """,
-            (),
+            (*TEMPERATURE_SENSOR_TYPES, _coerce_worker_id(worker_id)),
             source_name="environment",
         )
-        return EnvironmentSample(
+        sample = EnvironmentSample(
             temp_c=_required_float(row, "temp_c"),
             humid=_required_float(row, "humid"),
+            sensor_id=str(row.get("sensor_id") or ""),
+            sensor_name=str(row.get("sensor_name") or ""),
+            space_id=_optional_int(row, "space_id"),
+            space_name=str(row.get("space_name") or ""),
         )
+        logger.info(
+            "[RestRepository] environment worker_id=%s sensor_id=%s space_id=%s temp=%s humid=%s",
+            worker_id,
+            sample.sensor_id,
+            sample.space_id,
+            sample.temp_c,
+            sample.humid,
+        )
+        return sample
 
     def fetch_watch(self, worker_id: str) -> WatchSample:
         row = self._fetch_one(
             """
             SELECT
-                h.hr
+                h.hr,
+                wh.baseline_hr,
+                s.sensor_id AS sensor_id,
+                s.sen_name AS sensor_name
             FROM hb_trans h
             JOIN worker w
               ON h.sen_id = w.sen_id
+            JOIN worker_hr_data wh
+              ON wh.dept_id = w.dept_id
+            JOIN sensor s
+              ON s.sen_id = w.sen_id
             WHERE w.dept_id = %s
             ORDER BY h.time DESC
             LIMIT 1
@@ -67,21 +106,50 @@ class DatabaseHandlerRestDataRepository:
             (_coerce_worker_id(worker_id),),
             source_name="watch",
         )
-        return WatchSample(
+        sample = WatchSample(
             hr=_required_float(row, "hr"),
             baseline_hr=_optional_float(row, "baseline_hr"),
+            sensor_id=str(row.get("sensor_id") or ""),
+            sensor_name=str(row.get("sensor_name") or ""),
         )
+        logger.info(
+            "[RestRepository] watch worker_id=%s sensor_id=%s hr=%s baseline_hr=%s",
+            worker_id,
+            sample.sensor_id,
+            sample.hr,
+            sample.baseline_hr,
+        )
+        return sample
 
     def fetch_worker_profile(self, worker_id: str) -> WorkerProfile:
         row = self._fetch_one(
             """
             SELECT
-                w.*,
+                w.dept_id,
+                w.name,
+                w.is_manager,
+                w.sen_id,
+                wh.age,
+                wh.gender,
+                wh.height_cm,
+                wh.weight_kg,
+                wh.elderly_flag,
+                wh.heart_disease,
+                wh.hypertension,
+                wh.other_disease,
+                wh.baseline_hr,
                 s.sensor_id AS sensor_id,
-                s.mqtt_topic AS mqtt_topic
+                s.sen_name AS sensor_name,
+                s.mqtt_topic AS mqtt_topic,
+                s.space_id AS space_id,
+                sp.space_name AS space_name
             FROM worker w
+            JOIN worker_hr_data wh
+              ON wh.dept_id = w.dept_id
             LEFT JOIN sensor s
               ON w.sen_id = s.sen_id
+            LEFT JOIN ds_space sp
+              ON s.space_id = sp.space_id
             WHERE w.dept_id = %s
             LIMIT 1
             """,
@@ -90,25 +158,38 @@ class DatabaseHandlerRestDataRepository:
         )
 
         worker_id_value = str(_required_value(row, "dept_id"))
-        age = int(_optional_float(row, "age", self.default_age))
-        work_duration_min = _resolve_work_duration_min(
-            row,
-            default=self.default_work_duration_min,
-        )
+        age = int(_required_float(row, "age"))
+        work_duration_min = int(self.default_work_duration_min)
 
-        return WorkerProfile(
+        profile = WorkerProfile(
             worker_id=worker_id_value,
             age=age,
-            gender=_encode_gender(_pick(row, ("gender", "sex"), self.default_gender)),
-            height_cm=_optional_float(row, "height_cm", self.default_height_cm),
-            weight_kg=_optional_float(row, "weight_kg", self.default_weight_kg),
+            gender=_encode_gender(_required_value(row, "gender")),
+            height_cm=_required_float(row, "height_cm"),
+            weight_kg=_required_float(row, "weight_kg"),
             work_duration_min=work_duration_min,
-            elderly_flag=_to_int_flag(_pick(row, ("elderly_flag",), int(age >= 60))),
-            heart_disease=_to_int_flag(_pick(row, ("heart_disease",), 0)),
-            hypertension=_to_int_flag(_pick(row, ("hypertension",), 0)),
-            other_disease=_to_int_flag(_pick(row, ("other_disease",), 0)),
+            elderly_flag=_to_int_flag(_required_value(row, "elderly_flag")),
+            heart_disease=_to_int_flag(_required_value(row, "heart_disease")),
+            hypertension=_to_int_flag(_required_value(row, "hypertension")),
+            other_disease=_to_int_flag(_required_value(row, "other_disease")),
             target_topic=_resolve_target_topic(row),
+            baseline_hr=_optional_float(row, "baseline_hr"),
+            name=str(row.get("name") or ""),
+            sensor_id=str(row.get("sensor_id") or ""),
+            sensor_name=str(row.get("sensor_name") or ""),
+            space_id=_optional_int(row, "space_id"),
+            space_name=str(row.get("space_name") or ""),
         )
+        logger.info(
+            "[RestRepository] worker_profile worker_id=%s name=%s sensor_id=%s space_id=%s age=%s baseline_hr=%s",
+            profile.worker_id,
+            profile.name,
+            profile.sensor_id,
+            profile.space_id,
+            profile.age,
+            profile.baseline_hr,
+        )
+        return profile
 
     def fetch_last_hr_time(self, sensor_id: str) -> Optional[datetime]:
         """hb_trans 에서 이 센서의 가장 최근 심박 수신 시각을 반환한다.
@@ -190,21 +271,6 @@ def _resolve_target_topic(row: dict[str, Any]) -> str:
     raise ValueError("작업자에게 매핑된 heart_band 센서가 없어 휴식 명령 topic을 만들 수 없습니다.")
 
 
-def _resolve_work_duration_min(row: dict[str, Any], *, default: int) -> int:
-    if "work_duration_min" in row and row["work_duration_min"] not in (None, ""):
-        return int(_to_float(row["work_duration_min"], "work_duration_min"))
-
-    for key in ("work_start_at", "shift_start_at", "started_at"):
-        value = row.get(key)
-        if not value:
-            continue
-        start = _to_datetime(value)
-        if start:
-            return max(0, int((datetime.now() - start).total_seconds() // 60))
-
-    return int(default)
-
-
 def _to_datetime(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value
@@ -221,14 +287,6 @@ def _coerce_worker_id(worker_id: str) -> int | str:
     if text.isdigit():
         return int(text)
     return text
-
-
-def _pick(row: dict[str, Any], names: tuple[str, ...], default: Any = None) -> Any:
-    for name in names:
-        value = row.get(name)
-        if value not in (None, ""):
-            return value
-    return default
 
 
 def _required_value(row: dict[str, Any], column: str) -> Any:
@@ -251,6 +309,13 @@ def _optional_float(row: dict[str, Any], column: str, default: float | None = No
     if value is None or value == "":
         return default
     return _to_float(value, column)
+
+
+def _optional_int(row: dict[str, Any], column: str, default: int | None = None) -> Optional[int]:
+    value = _optional_float(row, column, None)
+    if value is None:
+        return default
+    return int(value)
 
 
 def _to_float(value: Any, column: str) -> float:

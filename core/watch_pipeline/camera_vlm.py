@@ -544,23 +544,71 @@ def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | No
 
 
 def _build_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
-    trigger_json = _limit_text(json.dumps(trigger, ensure_ascii=False, default=str), 500)
+    trigger_json = _limit_text(
+        json.dumps(_compact_watch_trigger_for_prompt(trigger), ensure_ascii=False, default=str),
+        850,
+    )
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
-        + "이벤트별 목적: 휴식 권고가 발생한 작업자와 같은 공간의 작업장 상태 확인입니다.\n"
-        "현재 CCTV 화면을 보고 작업장 상태를 JSON 하나로만 답하세요.\n"
-        "휴식 권고가 발생한 작업자와 같은 공간의 작업장 상태 확인이 목적입니다.\n"
+        + "이벤트별 목적: 휴식 권고가 발생한 작업자와 같은 공간을 감시하여 이상 행동/위험 상황을 관리자 앱에 전달하는 것입니다.\n"
+        "현재 CCTV 화면과 YOLO정규화텍스트를 함께 보고, 사람 이동/행동/위험요소/조치 필요성을 JSON 하나로만 답하세요.\n"
+        "휴식 권고 대상 작업자를 화면에서 특정할 수 없으면 worker_location은 same_space_unknown으로 쓰세요.\n"
+        "심박·온습도·개인 건강정보는 휴식 권고 이유 설명에만 쓰고, 화면에 보이지 않는 증상은 단정하지 마세요.\n"
         "불확실한 내용은 추측하지 말고 unknown 또는 빈 배열로 표시하세요.\n"
+        "코드블록 없이 JSON만 출력하세요.\n"
         "응답 형식:\n"
         "{"
         "\"summary\":\"현재 작업장 상태 한 문장\","
         "\"risk_level\":\"low|medium|high|unknown\","
+        "\"rest_recommendation\":\"약한휴식권고|강한휴식권고|반드시 휴식|unknown\","
+        "\"rest_reason\":\"심박/온습도/개인위험 기반 휴식 필요 이유 한 문장\","
+        "\"worker_location\":\"화면상 위치 또는 same_space_unknown\","
         "\"visible_people\":\"none|one|multiple|unknown\","
+        "\"person_actions\":[\"standing\",\"walking\",\"working\",\"sitting\",\"lying\",\"unknown\"],"
+        "\"movement\":\"left|right|toward_camera|away_from_camera|stationary|unknown\","
+        "\"abnormal_behavior\":\"none|staggering|falling|lying_down|unsafe_posture|unknown\","
         "\"visible_risks\":[\"fire\",\"smoke\",\"fall\",\"crowding\",\"unsafe_posture\",\"none\"],"
+        "\"detection_info\":\"YOLO와 화면 기반 탐지 요약 한 문장\","
         "\"recommended_action\":\"필요 조치 한 문장\""
         "}\n"
         f"휴식권고={trigger_json}"
     )
+
+
+def _compact_watch_trigger_for_prompt(trigger: dict) -> dict:
+    prediction = trigger.get("prediction") if isinstance(trigger, dict) else {}
+    if not isinstance(prediction, dict):
+        prediction = {}
+    worker = prediction.get("worker") if isinstance(prediction.get("worker"), dict) else {}
+    measurements = prediction.get("measurements") if isinstance(prediction.get("measurements"), dict) else {}
+    health_profile = prediction.get("health_profile") if isinstance(prediction.get("health_profile"), dict) else {}
+    return {
+        "watch_sensor_id": trigger.get("watch_sensor_id") if isinstance(trigger, dict) else None,
+        "worker_id": trigger.get("worker_id") if isinstance(trigger, dict) else None,
+        "worker": {
+            "dept_id": worker.get("dept_id"),
+            "name": worker.get("name"),
+            "space_id": worker.get("space_id"),
+            "space_name": worker.get("space_name"),
+        },
+        "rest_result": prediction.get("result"),
+        "rest_reason": prediction.get("reason"),
+        "rest_reason_detail": prediction.get("rest_reason_detail"),
+        "hr": measurements.get("hr"),
+        "baseline_hr": measurements.get("baseline_hr") or prediction.get("baseline_hr"),
+        "hr_delta_from_baseline": prediction.get("hr_delta_from_baseline"),
+        "heat_index": prediction.get("heat_index"),
+        "temp_c": measurements.get("temp_c"),
+        "humid": measurements.get("humid"),
+        "health_profile": {
+            "age": health_profile.get("age"),
+            "elderly_flag": health_profile.get("elderly_flag"),
+            "heart_disease": health_profile.get("heart_disease"),
+            "hypertension": health_profile.get("hypertension"),
+            "other_disease": health_profile.get("other_disease"),
+        },
+        "triggered_at": trigger.get("triggered_at") if isinstance(trigger, dict) else None,
+    }
 
 
 def _call_prompt_builder(
