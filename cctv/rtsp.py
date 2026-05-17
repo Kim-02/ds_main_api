@@ -224,6 +224,12 @@ def get_reader_status(camera_id: int) -> dict:
     return reader.status()
 
 
+def get_all_reader_ids() -> list[int]:
+    """진단용: 현재 등록된 RTSP reader의 camera_id 목록을 반환."""
+    with _readers_lock:
+        return list(_readers.keys())
+
+
 def stop_all_readers() -> None:
     with _readers_lock:
         camera_ids = list(_readers.keys())

@@ -1484,6 +1484,33 @@ class DatabaseHandler:
             logging.error("get_cctv_list 오류: %s", e)
             return []
 
+    def get_camera_rtsp_by_sen_id(self, sen_id: int) -> dict | None:
+        """camera_info에서 RTSP 접속 정보 조회. sensor_type 조건 없음.
+
+        get_cctv_by_sen_id가 sensor_type 필터 때문에 None을 반환할 때 사용.
+        stream API auto-start reader 용도.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            c.sen_id,
+                            c.ip_address,
+                            c.camera_id,
+                            c.camera_pw
+                        FROM camera_info c
+                        WHERE c.sen_id = %s
+                        LIMIT 1
+                        """,
+                        (sen_id,),
+                    )
+                    return cursor.fetchone()
+        except Exception as e:
+            logging.error("get_camera_rtsp_by_sen_id 오류: %s", e)
+            return None
+
     def get_cctv_by_sen_id(self, sen_id: int) -> dict | None:
         try:
             with self._get_connection() as conn:

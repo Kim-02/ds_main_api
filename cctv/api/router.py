@@ -37,23 +37,68 @@ def _mjpeg_part(jpeg_bytes: bytes) -> bytes:
     )
 
 
-def _make_placeholder(text: str = "대기 중...") -> bytes:
+def _make_placeholder(text: str = "Waiting for camera frame...") -> bytes:
+    """진단용 placeholder JPEG. 영문 사용 (cv2.putText는 한글 미지원)."""
     img = np.zeros((240, 320, 3), dtype=np.uint8)
     img[:] = (20, 20, 20)
-    cv2.putText(img, text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1, cv2.LINE_AA)
+    cv2.putText(img, text[:40], (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1, cv2.LINE_AA)
     _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
     return buf.tobytes()
 
 
-def _generate_from_existing_reader(sen_id: int):
+def _generate_from_existing_reader(sen_id: int, db=None):
     """기존 RtspReader / FrameBuffer에서 프레임을 읽어 MJPEG로 전송.
     RTSP 추가 연결 없음.
+    db가 전달되면 reader가 없을 때 auto-start를 시도한다.
     """
-    from cctv.rtsp import get_latest_frame
-    from cctv.buffer import get_recent_frames
+    from cctv.rtsp import get_latest_frame, get_reader_status, get_all_reader_ids, register_reader
+    from cctv.buffer import get_recent_frames, get_buffer_status, get_all_buffer_ids
 
     logger.info("[CCTV_STREAM] request camera_sen_id=%s source=buffer", sen_id)
+
+    # ── 1. 진단 로그: 현재 등록된 reader/buffer key 목록 ──────────────────
+    reader_ids = get_all_reader_ids()
+    buffer_ids = get_all_buffer_ids()
+    logger.info("[CCTV_STREAM] reader_ids=%s buffer_ids=%s", reader_ids, buffer_ids)
+
+    r_status = get_reader_status(sen_id)
+    b_status = get_buffer_status(sen_id)
+    logger.info(
+        "[CCTV_STREAM] reader_status camera_sen_id=%s running=%s opened=%s has_frame=%s",
+        sen_id, r_status.get("running"), r_status.get("opened"), r_status.get("has_frame"),
+    )
+    logger.info(
+        "[CCTV_STREAM] buffer_status camera_sen_id=%s running=%s frame_count=%s",
+        sen_id, b_status.get("running"), b_status.get("frame_count"),
+    )
+
+    # ── 2. reader가 없으면 auto-start 시도 (camera_info가 있을 때만) ──────
+    if not r_status.get("running") and db is not None:
+        row = db.get_camera_rtsp_by_sen_id(sen_id)
+        if row:
+            rtsp_url = service.build_rtsp_url(
+                ip_address=str(row["ip_address"]),
+                username=str(row["camera_id"]),
+                password=str(row["camera_pw"]),
+            )
+            logger.info(
+                "[CCTV_STREAM] auto-starting reader camera_sen_id=%s ip=%s",
+                sen_id, row["ip_address"],
+            )
+            started = register_reader(sen_id, rtsp_url)
+            if started:
+                logger.info("[CCTV_STREAM] reader started, waiting 2s for first frame camera_sen_id=%s", sen_id)
+                time.sleep(2.0)
+            else:
+                logger.info("[CCTV_STREAM] reader already running (same url) camera_sen_id=%s", sen_id)
+        else:
+            logger.warning(
+                "[CCTV_STREAM] no camera_info found for sen_id=%s → placeholder only", sen_id
+            )
+
+    # ── 3. 스트리밍 루프 ────────────────────────────────────────────────────
     first_sent = False
+    placeholder_count = 0
 
     while True:
         frame = None
@@ -69,19 +114,31 @@ def _generate_from_existing_reader(sen_id: int):
             if frames:
                 frame = frames[-1]["frame"]
 
-        # 3순위: placeholder
+        # 3순위: placeholder (영문, 한글 깨짐 없음)
         if frame is None:
-            yield _mjpeg_part(_make_placeholder("카메라 준비 중..."))
+            placeholder_count += 1
+            if placeholder_count == 1 or placeholder_count % 20 == 0:
+                logger.warning(
+                    "[CCTV_STREAM] no frame camera_sen_id=%s placeholder_count=%s",
+                    sen_id, placeholder_count,
+                )
+            yield _mjpeg_part(_make_placeholder(f"No frame / sen_id={sen_id}"))
             time.sleep(_MJPEG_PLACEHOLDER_FPS)
             continue
 
+        placeholder_count = 0
         if not first_sent:
-            logger.info("[CCTV_STREAM] first frame sent camera_sen_id=%s source=buffer", sen_id)
+            logger.info(
+                "[CCTV_STREAM] first real frame sent camera_sen_id=%s shape=%s",
+                sen_id, getattr(frame, "shape", "?"),
+            )
             first_sent = True
 
         ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         if ok:
             yield _mjpeg_part(jpeg.tobytes())
+        else:
+            logger.error("[CCTV_STREAM] jpeg encode failed camera_sen_id=%s", sen_id)
 
         time.sleep(_MJPEG_FPS_LIMIT)
 
@@ -233,9 +290,14 @@ def stream_camera_mjpeg(
       → camera_info DB 조회 불필요. RTSP 추가 연결 없음. 429 방지.
     source=rtsp: RTSP를 새로 열어 스트리밍. camera_info에서 자격증명 조회 필요.
     """
+    db = request.app.state.db
+
     if source == "rtsp":
         # RTSP fallback: 카메라 자격증명이 필요하므로 DB 조회
-        row = request.app.state.db.get_cctv_by_sen_id(sen_id)
+        row = db.get_cctv_by_sen_id(sen_id)
+        if not row:
+            # sensor_type 필터 없이 재시도
+            row = db.get_camera_rtsp_by_sen_id(sen_id)
         if not row:
             raise HTTPException(status_code=404, detail="CCTV 정보를 찾을 수 없습니다. (camera_info 없음)")
         rtsp_url = service.build_rtsp_url(
@@ -245,9 +307,9 @@ def stream_camera_mjpeg(
         )
         gen = _generate_from_rtsp_fallback(sen_id, rtsp_url)
     else:
-        # buffer mode: DB 조회 없이 기존 reader/buffer에서 직접 프레임 획득
-        # camera_info가 없어도 RtspReader가 실행 중이면 스트리밍 가능
-        gen = _generate_from_existing_reader(sen_id)
+        # buffer mode: 기존 reader/buffer에서 직접 프레임 획득
+        # reader가 없으면 camera_info 조회 후 auto-start 시도
+        gen = _generate_from_existing_reader(sen_id, db=db)
 
     return StreamingResponse(
         gen,
