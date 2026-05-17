@@ -24,9 +24,9 @@ class Settings(BaseSettings):
     vllm_port: int = 1111
     vllm_dtype: str = "float16"
     vllm_gpu_memory_utilization: float = 0.5
-    vllm_max_model_len: int = 4096
+    vllm_max_model_len: int = 8192
     vllm_max_num_seqs: int = 4
-    vllm_max_num_batched_tokens: int = 4096
+    vllm_max_num_batched_tokens: int = 8192
     vllm_limit_mm_per_prompt: str = "image=1,video=0"
     vllm_startup_timeout_seconds: int = 600
     vllm_startup_poll_seconds: float = 3.0
@@ -87,10 +87,10 @@ class Settings(BaseSettings):
     watch_alert_reset_after_ms: int = 5000
     watch_camera_vlm_session_seconds: int = 120
     watch_camera_vlm_analysis_interval_seconds: int = 30
-    camera_vlm_request_timeout_seconds: int = 30
-    camera_vlm_prompt_max_chars: int = 2400
+    camera_vlm_request_timeout_seconds: int = 90
+    camera_vlm_prompt_max_chars: int = 5600
     camera_vlm_retry_prompt_max_chars: int = 1100
-    camera_vlm_max_tokens: int = 384
+    camera_vlm_max_tokens: int = 512
     rest_forced_rest_work_minutes: int = 120
     rest_default_age: int = 40
     rest_default_gender: int = 1

@@ -172,11 +172,6 @@ class TemperatureCameraVlmManager:
         if isinstance(result, dict):
             result = _normalize_temperature_vlm_result(result, camera, last_trigger, yolo_context)
             payload["result"] = result
-            logger.info(
-                "[VLM TEXT] event_type=temperature_camera_vlm_enriched camera_sen_id=%s text=%s",
-                camera.get("sen_id"),
-                _json_dumps(result),
-            )
 
         # VLM 결과에서 핵심 정보 추출
         message_text = extract_vlm_text(result) or payload.get("text") or "온습도 이상 감지 - VLM 분석 완료"
@@ -196,6 +191,12 @@ class TemperatureCameraVlmManager:
 
         if isinstance(result, dict):
             message_text = _compose_temperature_alert_message(result)
+
+        logger.info(
+            "[VLM TEXT] event_type=temperature_camera_vlm camera_sen_id=%s app_text=%s",
+            camera.get("sen_id"),
+            message_text,
+        )
 
         camera_sen_id_raw = camera.get("sen_id")
         camera_sen_id = int(camera_sen_id_raw) if camera_sen_id_raw is not None else None
@@ -608,7 +609,7 @@ def run_temperature_camera_vlm_once(
             publish=publish,
         )
         logger.info(
-            "[VLM TEXT] event_type=temperature_camera_vlm sensor_id=%s camera_sen_id=%s text=%s",
+            "[VLM TEXT] event_type=temperature_camera_vlm sensor_id=%s camera_sen_id=%s app_text=%s",
             sensor_id,
             camera.get("sen_id"),
             camera_result.get("text", ""),

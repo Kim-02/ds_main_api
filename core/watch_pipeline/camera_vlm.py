@@ -21,7 +21,7 @@ from core.cctv_vlm_context import (
     build_yolo_normalized_context_from_frames,
     public_yolo_context,
 )
-from core.notifications import make_vlm_push_payload
+from core.notifications import extract_vlm_text, make_vlm_push_payload
 from core.vlm_prompt_builder import (
     build_common_autoregressive_vlm_prompt as shared_build_common_autoregressive_vlm_prompt,
     build_retry_prompt as shared_build_retry_prompt,
@@ -316,7 +316,7 @@ class WatchCameraVlmSession:
                     frame_path = str(yolo_context.get("image_path") or "")
                     result = self._request_vlm(yolo_context)
                     self._set_result(result, frame_path, "", yolo_context)
-                    self.manager.publish_result(make_vlm_push_payload(
+                    payload = make_vlm_push_payload(
                         self.event_type,
                         _notification_title(self.event_type),
                         result,
@@ -324,7 +324,14 @@ class WatchCameraVlmSession:
                         frame_path=frame_path,
                         yolo_context=public_yolo_context(yolo_context),
                         status=self.status(),
-                    ))
+                    )
+                    logger.info(
+                        "[VLM TEXT] event_type=%s camera_sen_id=%s app_text=%s",
+                        self.event_type,
+                        self.camera.get("sen_id"),
+                        payload.get("text") or payload.get("body") or "",
+                    )
+                    self.manager.publish_result(payload)
                 except Exception as exc:
                     logger.exception(
                         "[WatchCameraVLM] analysis failed camera_sen_id=%s",
@@ -385,6 +392,12 @@ class WatchCameraVlmSession:
             status=self.status(),
         )
         if publish:
+            logger.info(
+                "[VLM TEXT] event_type=%s camera_sen_id=%s app_text=%s",
+                self.event_type,
+                self.camera.get("sen_id"),
+                payload.get("text") or payload.get("body") or "",
+            )
             self.manager.publish_result(payload)
 
         return {
@@ -478,8 +491,19 @@ class WatchCameraVlmSession:
             max_tokens,
             public_yolo_context(yolo_context),
         )
+        json_system_prompt = (
+            "You are a JSON-only industrial safety assistant. "
+            "Return exactly one valid JSON object. No markdown, no headings, no code fences, no explanation outside JSON."
+        )
         try:
-            text = client.request_text(prompt, frame_path, max_tokens=max_tokens, temperature=0.2, stream=False)
+            text = client.request_text(
+                prompt,
+                frame_path,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                stream=False,
+                system_prompt=json_system_prompt,
+            )
         except Exception as exc:
             if not _is_prompt_too_long_error(exc):
                 raise
@@ -495,11 +519,12 @@ class WatchCameraVlmSession:
                 retry_prompt,
                 frame_path,
                 max_tokens=min(max_tokens, 192),
-                temperature=0.2,
+                temperature=0.0,
                 stream=False,
+                system_prompt=json_system_prompt,
             )
-        logger.info(
-            "[VLM TEXT] event_type=%s camera_sen_id=%s text=%s",
+        logger.debug(
+            "[VLM RAW] event_type=%s camera_sen_id=%s text=%s",
             self.event_type,
             self.camera.get("sen_id"),
             text,
@@ -507,11 +532,19 @@ class WatchCameraVlmSession:
         try:
             result = extract_json(text)
             if isinstance(result, dict):
+                if self.event_type == "temperature_camera_vlm":
+                    return result
                 return _normalize_worker_regression_vlm_result(result, self.camera, self._last_trigger, yolo_context)
             return result
         except Exception as exc:
             logger.warning("[WatchCameraVLM] JSON response parse failed: %s", exc)
-            return {"raw_text": text}
+            return _fallback_structured_vlm_result(
+                text,
+                self.camera,
+                self._last_trigger,
+                yolo_context,
+                event_type=self.event_type,
+            )
 
     def _set_result(
         self,
@@ -834,6 +867,150 @@ def _merge_actions(primary: list[str], secondary: list[str]) -> list[str]:
         if text and text not in merged:
             merged.append(text)
     return merged[:4]
+
+
+def _fallback_structured_vlm_result(
+    raw_text: str,
+    camera: dict,
+    last_trigger: dict,
+    yolo_context: dict | None,
+    *,
+    event_type: str,
+) -> dict:
+    """VLM이 마크다운/자연어를 반환해도 앱에는 구조화된 JSON만 보낸다."""
+    if event_type == "temperature_camera_vlm":
+        return _fallback_environment_vlm_result(raw_text, camera, last_trigger, yolo_context)
+    return _normalize_worker_regression_vlm_result(
+        _fallback_worker_vlm_result(raw_text, camera, last_trigger, yolo_context),
+        camera,
+        last_trigger,
+        yolo_context,
+    )
+
+
+def _fallback_worker_vlm_result(
+    raw_text: str,
+    camera: dict,
+    last_trigger: dict,
+    yolo_context: dict | None,
+) -> dict:
+    prediction = last_trigger.get("prediction") if isinstance(last_trigger, dict) else {}
+    if not isinstance(prediction, dict):
+        prediction = {}
+    worker = prediction.get("worker") if isinstance(prediction.get("worker"), dict) else {}
+    measurements = prediction.get("measurements") if isinstance(prediction.get("measurements"), dict) else {}
+    rest_result = str(prediction.get("result") or "unknown").strip()
+    worker_name = str(worker.get("name") or "").strip()
+    subject = f"{worker_name} 작업자" if worker_name else "해당 작업자"
+    detection_text = _detection_text_from_yolo(yolo_context)
+    return {
+        "risk_level": _risk_level_from_rest_result(rest_result) or "unknown",
+        "summary": _worker_rest_summary(worker_name, rest_result) if rest_result != "unknown" else "워치/밴드 기반 작업자 상태 확인이 필요합니다.",
+        "reason": prediction.get("rest_reason_detail") or prediction.get("reason") or "VLM 응답이 JSON이 아니어서 회귀 판단 결과를 기준으로 구조화했습니다.",
+        "health_considerations": "",
+        "recommended_actions": _default_worker_actions(rest_result, worker_name),
+        "target": {
+            "type": "worker",
+            "site_id": worker.get("space_id") or measurements.get("space_id") or camera.get("space_id"),
+            "site_name": worker.get("space_name") or measurements.get("space_name") or camera.get("space_name"),
+            "worker_id": worker.get("dept_id") or last_trigger.get("worker_id"),
+            "worker_name": worker_name or None,
+        },
+        "visible_people": _visible_people_from_yolo(yolo_context),
+        "person_actions": ["unknown"],
+        "worker_location": "same_space_unknown",
+        "abnormal_behavior": "unknown",
+        "visible_risks": _visible_risks_from_yolo(yolo_context),
+        "environment_status": {
+            "temperature_c": measurements.get("temp_c"),
+            "humidity_percent": measurements.get("humid"),
+            "heat_index_c": prediction.get("heat_index"),
+            "status": "unknown",
+        },
+        "detection_info": detection_text,
+        "hazard_material": camera.get("hazard_type") or "none",
+        "hazard_warning": "등록 위험물은 공간 속성이며 화면상 누출/화재가 확인되지 않으면 단정하지 않습니다.",
+        "hazard_specific_action": "관리자는 현장 상태와 작업자 위치를 확인합니다.",
+        "evacuation_route": "unknown",
+        "recommended_action": f"{subject} 상태를 확인하고 휴식 조치를 진행합니다.",
+        "vlm_parse_error": True,
+        "raw_text_preview": _limit_text(str(raw_text or ""), 220),
+    }
+
+
+def _fallback_environment_vlm_result(
+    raw_text: str,
+    camera: dict,
+    last_trigger: dict,
+    yolo_context: dict | None,
+) -> dict:
+    prediction = last_trigger.get("prediction") if isinstance(last_trigger, dict) else {}
+    if not isinstance(prediction, dict):
+        prediction = {}
+    sample = prediction.get("sample") if isinstance(prediction.get("sample"), dict) else {}
+    health_attention = (
+        prediction.get("health_attention")
+        if isinstance(prediction.get("health_attention"), dict)
+        else {}
+    )
+    return {
+        "risk_level": "medium" if prediction.get("temperature_sensor_id") else "unknown",
+        "summary": f"{prediction.get('space_name') or camera.get('space_name') or '작업장'} 현장 상태 확인이 필요합니다.",
+        "reason": "VLM 응답이 JSON이 아니어서 온습도 이벤트와 YOLO 탐지 요약을 기준으로 구조화했습니다.",
+        "health_considerations": health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요",
+        "recommended_actions": ["관리자는 현장 온습도와 작업자 상태를 확인합니다.", "작업자는 이상 증상이 있으면 즉시 보고하고 안전한 위치에서 대기합니다."],
+        "target": {
+            "type": "site",
+            "site_id": prediction.get("space_id") or camera.get("space_id"),
+            "site_name": prediction.get("space_name") or camera.get("space_name"),
+            "worker_id": None,
+            "worker_name": None,
+        },
+        "visible_people": _visible_people_from_yolo(yolo_context),
+        "person_actions": ["unknown"],
+        "worker_location": "same_space_unknown",
+        "abnormal_behavior": "unknown",
+        "visible_risks": _visible_risks_from_yolo(yolo_context),
+        "environment_status": {
+            "temperature_c": sample.get("temp"),
+            "humidity_percent": sample.get("humid"),
+            "heat_index_c": prediction.get("heat_index"),
+            "status": "caution",
+        },
+        "detection_info": _detection_text_from_yolo(yolo_context),
+        "hazard_material": prediction.get("hazard_type") or camera.get("hazard_type") or "none",
+        "hazard_warning": "등록 위험물은 공간 속성이며 화면상 누출/화재가 확인되지 않으면 단정하지 않습니다.",
+        "hazard_specific_action": "관리자는 현장 접근을 제한하고 필요 시 환기와 대피 경로를 확인합니다.",
+        "evacuation_route": "unknown",
+        "recommended_action": "관리자는 현장 상태와 작업자 이상 여부를 확인합니다.",
+        "vlm_parse_error": True,
+        "raw_text_preview": _limit_text(str(raw_text or ""), 220),
+    }
+
+
+def _visible_people_from_yolo(yolo_context: dict | None) -> str:
+    summary = yolo_context.get("detection_summary") if isinstance(yolo_context, dict) else {}
+    if isinstance(summary, dict) and summary.get("visible_people"):
+        return str(summary.get("visible_people"))
+    return "unknown"
+
+
+def _visible_risks_from_yolo(yolo_context: dict | None) -> list[str]:
+    summary = yolo_context.get("detection_summary") if isinstance(yolo_context, dict) else {}
+    risks = summary.get("visible_risks") if isinstance(summary, dict) else None
+    if isinstance(risks, list) and risks:
+        return [str(item) for item in risks]
+    return ["unknown"]
+
+
+def _detection_text_from_yolo(yolo_context: dict | None) -> str:
+    summary = yolo_context.get("detection_summary") if isinstance(yolo_context, dict) else {}
+    if isinstance(summary, dict) and summary.get("text"):
+        return str(summary.get("text"))
+    public = public_yolo_context(yolo_context or {})
+    if public.get("normalized_text_preview"):
+        return str(public.get("normalized_text_preview"))
+    return "YOLO 탐지 요약 없음"
 
 
 def _as_bool(value: Any) -> bool:
