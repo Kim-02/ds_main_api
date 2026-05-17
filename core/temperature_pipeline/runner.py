@@ -904,9 +904,10 @@ def _normalize_temperature_vlm_result(
         normalized.setdefault("hazard_material", "none")
 
     if health_attention:
-        normalized.setdefault("health_considerations", health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요")
-    else:
-        normalized.setdefault("health_considerations", "현장 건강 취약 작업자 정보 없음")
+        if not _has_meaningful_text(normalized.get("health_considerations")):
+            normalized["health_considerations"] = health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요"
+    elif not _has_meaningful_text(normalized.get("health_considerations")):
+        normalized["health_considerations"] = "현장 건강 취약 작업자 정보 없음"
 
     recommended_actions = normalized.get("recommended_actions")
     if isinstance(recommended_actions, list) and recommended_actions:

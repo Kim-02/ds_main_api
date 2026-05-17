@@ -39,11 +39,9 @@ def build_vlm_prompt(
 def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | None) -> str:
     return (
         "분석 명칭: autoregressive VLM.\n"
-        "목적: 산업 안전 관점에서 CCTV 장면과 센서 맥락을 함께 보고 관리자 조치를 안내합니다.\n"
-        "의료 진단을 하지 마세요. 질병 확정 표현 대신 '가능성이 있다', '주의가 필요하다', '관리자 확인이 필요하다'를 사용하세요.\n"
-        "현재 CCTV 이미지가 최우선이고, YOLO 10초 정규화 텍스트는 이동/탐지 흐름을 보조하는 참고 정보입니다.\n"
-        "현재 이미지에 안 보이는 사람/객체/누출/화재를 확정하지 마세요.\n"
-        "화재/연기/열원은 현재 이미지 또는 YOLO정규화텍스트에 근거가 있을 때만 확정하세요.\n"
+        "산업 안전 안내만 작성, 의료 진단 금지. 가능성/주의/관리자 확인 표현을 사용하세요.\n"
+        "현재 CCTV 이미지 우선, YOLO 10초 정규화는 보조 근거. 보이지 않는 사람/객체/누출/화재를 확정하지 마세요.\n"
+        "등록 위험물은 공간 속성입니다. 화면에 누출/가스가 없으면 존재/부재를 단정하지 마세요.\n"
         f"현재시각={datetime.now().isoformat(timespec='seconds')}\n"
         f"카메라={json_dumps(compact_camera_for_prompt(camera))}\n"
         f"{format_yolo_context_for_prompt(yolo_context)}\n"
@@ -56,12 +54,12 @@ def build_environment_health_prompt(camera: dict, trigger: dict, yolo_context: d
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "판단유형=environment\n"
         "관점: 현장 단위 환경 위험도 판단입니다. 특정 작업자에게 문제가 발생했다고 단정하지 마세요.\n"
-        "개인 건강 데이터는 '현장에 건강상 주의가 필요한 작업자가 포함되어 있는지'를 보는 보조 정보입니다.\n"
-        "현장 온도/습도/열지수, 건강 취약 작업자 존재 여부, 화면상 작업자 행동, 발생 가능한 위험상황, 관리자 조치, 작업자 안내를 설명하세요.\n"
-        "건강 취약 작업자가 있더라도 화면상 이상행동이 명확하지 않으면 '확인 필요'로 표현하세요.\n"
+        "개인 건강 데이터는 현장에 건강상 주의가 필요한 작업자가 포함되어 있는지 보는 보조 정보입니다.\n"
+        "온도/습도/열지수, 건강 취약 작업자 존재, 화면상 행동, 현장 위험, 관리자 조치, 작업자 안내를 설명하세요.\n"
+        "건강 취약 작업자가 있더라도 화면상 이상행동이 명확하지 않으면 확인 필요로 표현하세요.\n"
+        f"현장환경이벤트={json_dumps(context)}\n"
         "코드블록 없이 JSON 하나만 출력하세요.\n"
-        f"응답형식={_common_response_schema(target_type='site')}\n"
-        f"현장환경이벤트={json_dumps(context)}"
+        f"응답형식={_common_response_schema(target_type='site')}"
     )
 
 
@@ -70,13 +68,13 @@ def build_worker_regression_prompt(camera: dict, trigger: dict, yolo_context: di
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "판단유형=worker_regression\n"
-        "관점: 특정 작업자 중심 위험도 판단입니다. 회귀 모델/워치 판단으로 휴식 또는 조치가 필요한 작업자를 설명하세요.\n"
-        "해당 작업자의 심박, 기준심박 대비 변화, 개인 건강 위험요인, 현재 작업장 온습도/열지수, 화면상 행동을 함께 고려하세요.\n"
-        "CCTV에서 해당 작업자를 특정할 수 없으면 worker_location은 same_space_unknown으로 쓰고, 화면상 증상은 단정하지 마세요.\n"
-        "작업자가 즉시 취할 행동과 관리자가 해야 할 대응을 구분해서 recommended_actions에 넣으세요.\n"
+        "관점: 특정 작업자 위험도. 심박/기준심박/건강요인/온습도/열지수/화면 행동을 함께 보세요.\n"
+        "작업자를 화면에서 특정 못하면 worker_location=same_space_unknown, 화면상 증상은 단정 금지.\n"
+        "회귀 결과가 약한휴식권고이면 risk_level은 최소 medium, 강한휴식권고는 high, 반드시 휴식은 critical로 보세요.\n"
+        "휴식권고가 있으면 CCTV에 사람이 안 보여도 no_action을 쓰지 말고 작업자 휴식/관리자 확인 조치를 recommended_actions에 넣으세요.\n"
+        f"작업자회귀판단={json_dumps(context)}\n"
         "코드블록 없이 JSON 하나만 출력하세요.\n"
-        f"응답형식={_common_response_schema(target_type='worker')}\n"
-        f"작업자회귀판단={json_dumps(context)}"
+        f"응답형식={_common_response_schema(target_type='worker')}"
     )
 
 
@@ -276,7 +274,7 @@ def extract_hazard_type(camera: dict, trigger: dict) -> str:
 
 
 def json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
 def limit_text(text: str, max_chars: int) -> str:
@@ -307,35 +305,35 @@ def _common_response_schema(*, target_type: str) -> str:
     worker_id_value = "작업자 ID" if target_type == "worker" else None
     worker_name_value = "작업자명" if target_type == "worker" else None
     schema = {
-        "risk_level": "low|medium|high|critical|unknown",
-        "summary": "현재 상황 요약 한 문장",
-        "reason": "위험 판단 이유. 진단처럼 단정하지 말 것",
-        "health_considerations": "건강 데이터상 주의할 점. 없으면 none",
-        "recommended_actions": ["관리자 조치", "작업자 안내"],
+        "risk_level": "",
+        "summary": "",
+        "reason": "",
+        "health_considerations": "",
+        "recommended_actions": [],
         "target": {
             "type": target_type,
-            "site_id": "space_id",
-            "site_name": "space_name",
+            "site_id": "",
+            "site_name": "",
             "worker_id": worker_id_value,
             "worker_name": worker_name_value,
         },
-        "visible_people": "none|one|multiple|unknown",
-        "person_actions": ["working|moving|leaving|staggering|fallen|unknown"],
-        "worker_location": "화면상 위치 또는 same_space_unknown",
-        "abnormal_behavior": "none|staggering|unstable_posture|fallen|confused|unknown",
-        "visible_risks": ["fire|smoke|spill|unsafe_posture|none"],
+        "visible_people": "",
+        "person_actions": [],
+        "worker_location": "",
+        "abnormal_behavior": "",
+        "visible_risks": [],
         "environment_status": {
-            "temperature_c": "number|null",
-            "humidity_percent": "number|null",
-            "heat_index_c": "number|null",
-            "status": "normal|caution|danger|unknown",
+            "temperature_c": None,
+            "humidity_percent": None,
+            "heat_index_c": None,
+            "status": "",
         },
-        "detection_info": "YOLO와 화면 기반 탐지 요약",
-        "hazard_material": "위험물명 또는 none",
-        "hazard_warning": "위험물/현장 경고 또는 none",
-        "hazard_specific_action": "위험물별 대처 또는 none",
-        "evacuation_route": "대피 경로 또는 unknown",
-        "recommended_action": "기존 앱 호환용 조치 한 문장",
+        "detection_info": "",
+        "hazard_material": "",
+        "hazard_warning": "",
+        "hazard_specific_action": "",
+        "evacuation_route": "",
+        "recommended_action": "",
     }
     return json_dumps(schema)
 

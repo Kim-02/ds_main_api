@@ -259,6 +259,11 @@ class WatchCameraVlmSession:
                 "prediction": prediction or {},
                 "triggered_at": _now_iso(),
             }
+            self._latest_result = None
+            self._latest_error = ""
+            self._latest_frame_path = ""
+            self._latest_frame_source = ""
+            self._latest_yolo_context = {}
             self._updated_at = _now_iso()
         self._wake_event.set()
         logger.info(
@@ -657,43 +662,74 @@ def _normalize_worker_regression_vlm_result(
     worker = prediction.get("worker") if isinstance(prediction.get("worker"), dict) else {}
     measurements = prediction.get("measurements") if isinstance(prediction.get("measurements"), dict) else {}
     health_profile = prediction.get("health_profile") if isinstance(prediction.get("health_profile"), dict) else {}
+    rest_result = str(prediction.get("result") or "").strip()
+    worker_name = str(worker.get("name") or "").strip()
 
     if normalized.get("risk_level") is not None:
         normalized["risk_level"] = str(normalized.get("risk_level")).strip().lower()
+    rest_risk_level = _risk_level_from_rest_result(rest_result)
+    if rest_risk_level and _risk_rank(normalized.get("risk_level")) < _risk_rank(rest_risk_level):
+        normalized["risk_level"] = rest_risk_level
 
     normalized["target"] = {
         "type": "worker",
         "site_id": worker.get("space_id") or measurements.get("space_id") or camera.get("space_id"),
         "site_name": worker.get("space_name") or measurements.get("space_name") or camera.get("space_name"),
         "worker_id": worker.get("dept_id") or last_trigger.get("worker_id"),
-        "worker_name": worker.get("name"),
+        "worker_name": worker_name or None,
     }
-    normalized.setdefault(
-        "reason",
+    rest_reason = (
         prediction.get("rest_reason_detail")
         or prediction.get("reason")
-        or "워치/밴드 생체 데이터와 회귀 모델 결과를 기반으로 특정 작업자 조치 필요성을 판단했습니다.",
+        or "워치/밴드 생체 데이터와 회귀 모델 결과를 기반으로 특정 작업자 조치 필요성을 판단했습니다."
     )
-    normalized.setdefault("rest_recommendation", prediction.get("result") or "unknown")
-    normalized.setdefault(
-        "environment_status",
-        {
-            "temperature_c": measurements.get("temp_c"),
-            "humidity_percent": measurements.get("humid"),
-            "heat_index_c": prediction.get("heat_index"),
-            "status": "unknown",
-        },
-    )
+    vlm_reason = str(normalized.get("reason") or "").strip()
+    if rest_result:
+        if _reason_conflicts_with_rest(vlm_reason):
+            normalized["reason"] = str(rest_reason)
+        elif vlm_reason and str(rest_reason) not in vlm_reason:
+            normalized["reason"] = f"{rest_reason} / CCTV 참고: {vlm_reason}"
+        else:
+            normalized["reason"] = str(rest_reason)
+    else:
+        normalized.setdefault("reason", str(rest_reason))
+
+    normalized["rest_recommendation"] = rest_result or "unknown"
+    normalized["environment_status"] = {
+        "temperature_c": measurements.get("temp_c"),
+        "humidity_percent": measurements.get("humid"),
+        "heat_index_c": prediction.get("heat_index"),
+        "status": (
+            "danger"
+            if rest_risk_level in {"high", "critical"}
+            else ("caution" if rest_risk_level == "medium" else "unknown")
+        ),
+    }
 
     risk_factors = shared_health_risk_factor_names(health_profile)
-    normalized.setdefault(
-        "health_considerations",
-        ", ".join(risk_factors) if risk_factors else "등록된 건강 위험 요인은 없거나 확인되지 않았습니다.",
+    health_text = (
+        "등록 건강 유의요인: " + ", ".join(risk_factors)
+        if risk_factors
+        else "등록된 건강 위험 요인은 없거나 확인되지 않았습니다."
     )
+    if not _has_meaningful_worker_text(normalized.get("health_considerations")) or risk_factors:
+        normalized["health_considerations"] = health_text
 
-    recommended_actions = normalized.get("recommended_actions")
-    if isinstance(recommended_actions, list) and recommended_actions:
-        normalized.setdefault("recommended_action", str(recommended_actions[0]))
+    summary = str(normalized.get("summary") or "").strip()
+    if rest_result and _summary_conflicts_with_rest(summary, worker_name):
+        normalized["summary"] = _worker_rest_summary(worker_name, rest_result)
+
+    recommended_actions = _as_action_list(normalized.get("recommended_actions"))
+    if rest_result:
+        recommended_actions = _merge_actions(
+            _default_worker_actions(rest_result, worker_name),
+            recommended_actions,
+        )
+        normalized["recommended_actions"] = recommended_actions
+        normalized["recommended_action"] = recommended_actions[0]
+    elif recommended_actions:
+        normalized["recommended_actions"] = recommended_actions
+        normalized.setdefault("recommended_action", recommended_actions[0])
 
     detection_summary = yolo_context.get("detection_summary") if isinstance(yolo_context, dict) else {}
     if detection_summary and "detection_info" not in normalized:
@@ -705,6 +741,99 @@ def _normalize_worker_regression_vlm_result(
     normalized.setdefault("worker_location", "same_space_unknown")
     normalized.setdefault("abnormal_behavior", "unknown")
     return normalized
+
+
+def _risk_level_from_rest_result(rest_result: str) -> str:
+    text = str(rest_result or "")
+    if "반드시" in text:
+        return "critical"
+    if "강한" in text:
+        return "high"
+    if "약한" in text:
+        return "medium"
+    return ""
+
+
+def _risk_rank(level: Any) -> int:
+    return {
+        "": 0,
+        "unknown": 0,
+        "low": 1,
+        "medium": 2,
+        "high": 3,
+        "critical": 4,
+    }.get(str(level or "").strip().lower(), 0)
+
+
+def _has_meaningful_worker_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text not in {"", "none", "unknown", "null", "false", "0", "no", "no_action", "없음"}
+
+
+def _reason_conflicts_with_rest(reason: str) -> bool:
+    text = str(reason or "")
+    return (
+        not _has_meaningful_worker_text(text)
+        or "위험이 없" in text
+        or "위험도가 낮" in text
+        or "조치 없음" in text
+        or "no_action" in text
+    )
+
+
+def _summary_conflicts_with_rest(summary: str, worker_name: str) -> bool:
+    text = str(summary or "")
+    if not _has_meaningful_worker_text(text):
+        return True
+    if worker_name and worker_name in text:
+        return False
+    if "작업자" in text or "근로자" in text:
+        return False
+    return any(phrase in text for phrase in ("위험이 없습니다", "위험도가 낮", "사람이나 물체가 보이지"))
+
+
+def _worker_rest_summary(worker_name: str, rest_result: str) -> str:
+    subject = f"{worker_name} 작업자" if worker_name else "해당 작업자"
+    return f"{subject}에게 {rest_result}가 발생했으며, CCTV에서 직접 특정되지 않더라도 관리자 확인과 휴식 조치가 필요합니다."
+
+
+def _default_worker_actions(rest_result: str, worker_name: str) -> list[str]:
+    subject = f"{worker_name} 작업자" if worker_name else "해당 작업자"
+    if "반드시" in str(rest_result):
+        return [
+            f"{subject}는 즉시 작업을 중단하고 안전한 장소에서 휴식합니다.",
+            "관리자는 상태를 직접 확인하고 필요 시 응급 조치 또는 보호자/담당자 연락을 진행합니다.",
+        ]
+    return [
+        f"{subject}는 작업 강도를 낮추고 물 섭취와 휴식을 취합니다.",
+        "관리자는 작업자 위치와 상태를 확인하고 필요 시 작업에서 일시 제외합니다.",
+    ]
+
+
+def _as_action_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif value:
+        items = [value]
+    else:
+        items = []
+    cleaned = []
+    for item in items:
+        text = str(item or "").strip()
+        if not _has_meaningful_worker_text(text):
+            continue
+        if text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+def _merge_actions(primary: list[str], secondary: list[str]) -> list[str]:
+    merged = []
+    for item in primary + secondary:
+        text = str(item or "").strip()
+        if text and text not in merged:
+            merged.append(text)
+    return merged[:4]
 
 
 def _as_bool(value: Any) -> bool:
