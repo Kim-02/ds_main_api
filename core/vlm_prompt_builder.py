@@ -50,19 +50,26 @@ def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | No
 
 def build_environment_health_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
     context = compact_environment_trigger_for_prompt(camera, trigger)
+    health = context.get("health_attention") or {}
+    risk_factors = health.get("risk_factors") or {}
+    action_hints = _risk_factor_action_hints(risk_factors)
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "판단유형=environment\n"
-        "관점: 현장 단위 건강 주의 판단입니다. 아래 세 가지를 각각 분리해서 판단하세요.\n"
-        "① CCTV 영상 기반: 현재 현장 상태(field_status)와 작업자 동향(worker_movements)을 화면에서 직접 묘사하세요.\n"
-        "② DB 건강 정보 기반: health_attention 데이터를 참고하여 작업자별 건강 위험(worker_risks)과 전체 요약(health_risk_summary)을 작성하세요.\n"
-        "③ [비틀거림·신체 이상 탐지] CCTV 이미지와 YOLO 10초 이력을 함께 보세요.\n"
-        "   - 이미지에서 자세 확인: 직립/기댐/쭈그림/쓰러짐\n"
-        "   - person_movement.delta가 크거나 방향이 불규칙하면 staggering 가능성\n"
-        "   - abnormal_behavior에 반드시 하나를 채우세요: staggering|falling|slumping|crouching|leaning|normal|not_visible\n"
-        "   - staggering 또는 falling 탐지 시 risk_level을 최소 high로 올리고 recommended_actions 맨 앞에 '즉시 현장 확인' 추가\n"
-        "특정 작업자에게 문제가 발생했다고 단정하지 마세요. 화면에 이상행동이 명확하지 않으면 '확인 필요'로 표현하세요.\n"
-        "관리자가 즉시 행동할 수 있도록 recommended_actions를 구체적으로 작성하세요.\n"
+        "아래 필드를 각각 독립적으로 작성하세요. 필드 설명 문구는 출력하지 마세요.\n"
+        "─ field_status: 현재 화면에서 보이는 현장 상태를 한 문장으로 묘사하세요.\n"
+        "─ worker_movements: YOLO 10초 관찰을 포함해 다음 형식으로 작성하세요:\n"
+        "  '[N명 관찰] 이동패턴=[normal/staggering/stable/irregular/unknown] — [동작 묘사]'\n"
+        "  예) '2명 관찰, 이동패턴=stable — 컴퓨터 앞 정지 상태, 10초간 움직임 거의 없음'\n"
+        "─ abnormal_behavior: staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나만 쓰세요.\n"
+        "  - YOLO delta가 크거나 불규칙 → staggering, 이미지에서 쓰러짐 → falling, 정상 직립 → normal\n"
+        "  - staggering 또는 falling 탐지 시 risk_level=high 이상, recommended_actions 맨 앞에 '즉시 현장 확인' 추가\n"
+        "─ health_risk_summary: health_attention 데이터를 한 문장으로 요약하세요.\n"
+        "─ recommended_actions: 건강 위험 요인별 즉시 실행 가능한 구체적 조치를 나열하세요.\n"
+        f"  위험 요인별 권고 참고: {action_hints}\n"
+        "  각 항목은 '무엇을 → 어떻게'가 명확한 한 문장으로 작성하세요.\n"
+        "─ summary: 관리자가 한눈에 이해할 수 있는 한 줄 요약 (건강 위험 + 행동 관찰 포함)\n"
+        "특정 작업자에게 문제가 발생했다고 단정하지 마세요. 이상행동이 명확하지 않으면 '확인 필요'로 표현하세요.\n"
         f"현장건강이벤트={json_dumps(context)}\n"
         "코드블록 없이 JSON 하나만 출력하세요.\n"
         f"응답형식={_common_response_schema(target_type='site')}"
@@ -286,19 +293,32 @@ def _prediction_or_trigger(trigger: dict) -> dict:
     return trigger if isinstance(trigger, dict) else {}
 
 
+def _risk_factor_action_hints(risk_factors: dict) -> str:
+    hints = []
+    if risk_factors.get("elderly", 0):
+        hints.append("고령→고강도 작업 중단·시원한 장소 이동·수분 보충")
+    if risk_factors.get("hypertension", 0):
+        hints.append("고혈압→즉시 휴식·혈압 측정·무거운 물건 취급 제한")
+    if risk_factors.get("heart_disease", 0):
+        hints.append("심장질환→작업 즉시 중단·의료진 연락")
+    if risk_factors.get("other_disease", 0):
+        hints.append("기타질환→이상 증상 보고 유도·안정 취하도록 안내")
+    if not hints:
+        hints.append("이상 증상 발생 시 즉시 보고·안전한 장소 대기")
+    return " / ".join(hints)
+
+
 def _common_response_schema(*, target_type: str) -> str:
     if target_type == "site":
         schema = {
-            "risk_level": "none|low|medium|high|critical 중 하나",
-            "summary": "관리자용 한 줄 현장 요약",
-            "field_status": "CCTV 기반 현장 상태 묘사",
-            "worker_movements": "CCTV 기반 작업자 동향 묘사",
+            "risk_level": "",
+            "summary": "",
+            "field_status": "",
+            "worker_movements": "",
             "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
-            "health_risk_summary": "DB 기반 전체 건강 위험 요약",
-            "worker_risks": [
-                {"worker_name": "작업자명 또는 익명", "risk_factors": ["위험요인"], "note": "비고"}
-            ],
-            "recommended_actions": ["관리자 즉시 조치사항"],
+            "health_risk_summary": "",
+            "worker_risks": [],
+            "recommended_actions": [],
             "target": {
                 "type": "site",
                 "site_id": "",

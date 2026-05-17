@@ -845,8 +845,16 @@ def _normalize_temperature_vlm_result(
     if not isinstance(normalized.get("worker_risks"), list):
         normalized["worker_risks"] = []
 
-    if not isinstance(normalized.get("recommended_actions"), list):
-        normalized["recommended_actions"] = []
+    actions = normalized.get("recommended_actions")
+    if not isinstance(actions, list):
+        actions = []
+
+    # VLM 조치가 비어 있거나 건강 요약을 그대로 반복하면 DB 기반으로 보강
+    risk_factors = health_attention.get("risk_factors") or {}
+    db_actions = _build_actions_from_risk_factors(risk_factors, health_attention)
+    if db_actions and _actions_are_generic(actions, health_attention.get("summary") or ""):
+        actions = db_actions + [a for a in actions if a not in db_actions]
+    normalized["recommended_actions"] = actions
 
     normalized.setdefault("abnormal_behavior", "not_visible")
 
@@ -994,6 +1002,43 @@ def _build_hazard_context(camera: dict, trigger: dict) -> dict:
             else "등록된 유의물 없음"
         ),
     }
+
+
+def _build_actions_from_risk_factors(risk_factors: dict, health_attention: dict) -> list[str]:
+    """DB 건강 위험 요인을 바탕으로 즉시 실행 가능한 구체적 조치 목록을 생성한다."""
+    actions = []
+    if risk_factors.get("elderly", 0):
+        actions.append("고령 작업자 → 고강도 작업 즉시 중단, 시원한 장소로 이동 및 수분 보충 지시")
+    if risk_factors.get("hypertension", 0):
+        actions.append("고혈압 작업자 → 즉시 휴식 조치, 혈압 측정 후 이상 시 의료 지원 요청")
+    if risk_factors.get("heart_disease", 0):
+        actions.append("심장질환 작업자 → 작업 즉시 중단, 의료진 또는 응급 연락")
+    if risk_factors.get("other_disease", 0):
+        actions.append("기타질환 작업자 → 이상 증상 발생 시 즉시 보고, 안정 취하도록 안내")
+    abnormal_hr = health_attention.get("abnormal_hr_count", 0)
+    if abnormal_hr:
+        actions.append(f"이상 심박 의심 작업자 {abnormal_hr}명 → 현장 즉시 확인 및 안정 유도")
+    if not actions:
+        actions.append("이상 증상 발생 시 즉시 보고 및 안전한 장소에서 대기 지시")
+    return actions
+
+
+def _actions_are_generic(actions: list, health_summary: str) -> bool:
+    """VLM이 건강 요약을 그대로 반복하거나 조치가 비어 있으면 True."""
+    if not actions:
+        return True
+    summary_stripped = health_summary.strip()
+    for action in actions:
+        action_text = str(action).strip()
+        if not action_text:
+            continue
+        if summary_stripped and summary_stripped in action_text:
+            return True
+        if len(action_text) > 60 and any(
+            kw in action_text for kw in ("건강상 주의가 필요한", "건강 관리를 요청", "건강검진을 권장")
+        ):
+            return True
+    return False
 
 
 def _hazard_response_guide(hazard_type: str) -> str:
