@@ -772,7 +772,26 @@ def _normalize_worker_regression_vlm_result(
         }
 
     normalized.setdefault("worker_location", "same_space_unknown")
-    normalized.setdefault("abnormal_behavior", "unknown")
+    normalized.setdefault("abnormal_behavior", "not_visible")
+    normalized.setdefault("behavior_observation", {
+        "posture": "unknown",
+        "movement_pattern": "unknown",
+        "confidence": "low",
+        "detail": "화면에서 자세·이동 패턴을 확인할 수 없습니다.",
+    })
+
+    # 비틀거림·낙상 탐지 시 risk_level 강제 상향
+    abnormal = str(normalized.get("abnormal_behavior") or "").strip().lower()
+    if abnormal in {"staggering", "falling"}:
+        if _risk_rank(normalized.get("risk_level")) < _risk_rank("high"):
+            normalized["risk_level"] = "high"
+        actions = normalized.get("recommended_actions")
+        if not isinstance(actions, list):
+            actions = []
+        fall_action = "즉시 현장 확인 — 작업자 비틀거림·낙상 가능성이 감지되었습니다."
+        if fall_action not in actions:
+            normalized["recommended_actions"] = [fall_action] + actions
+
     return normalized
 
 

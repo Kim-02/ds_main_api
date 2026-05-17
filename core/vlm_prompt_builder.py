@@ -75,6 +75,13 @@ def build_worker_regression_prompt(camera: dict, trigger: dict, yolo_context: di
         "작업자를 화면에서 특정 못하면 worker_location=same_space_unknown, 화면상 증상은 단정 금지.\n"
         "회귀 결과가 약한휴식권고이면 risk_level은 최소 medium, 강한휴식권고는 high, 반드시 휴식은 critical로 보세요.\n"
         "휴식권고가 있으면 CCTV에 사람이 안 보여도 no_action을 쓰지 말고 작업자 휴식/관리자 확인 조치를 recommended_actions에 넣으세요.\n"
+        "[비틀거림·신체 이상 탐지 - pose estimation 없이 VLM으로 판단]\n"
+        "① 현재 이미지에서 사람의 자세를 보세요: 직립=upright, 기대거나 몸이 기울어짐=leaning, 쭈그리거나 구부러짐=crouching, 쓰러짐=fallen.\n"
+        "② YOLO 10초 이력(person_movement.delta)에서 이동 패턴을 보세요: delta 값이 크거나 방향이 불규칙하면 staggering 가능성. 작고 일정하면 normal.\n"
+        "③ abnormal_behavior 필드에 아래 중 하나를 반드시 채우세요:\n"
+        "   'staggering'(비틀거림), 'falling'(쓰러짐·낙상), 'slumping'(축 처짐), 'crouching'(쭈그림), 'leaning'(기댐), 'normal'(정상), 'not_visible'(화면 미확인)\n"
+        "④ staggering 또는 falling 탐지 시 risk_level을 최소 high로 올리고, recommended_actions에 즉각 현장 확인을 추가하세요.\n"
+        "⑤ 화면에 사람이 없으면 abnormal_behavior='not_visible'로 쓰고, YOLO 이력만 참고해 판단하세요.\n"
         f"작업자회귀판단={json_dumps(context)}\n"
         "코드블록 없이 JSON 하나만 출력하세요.\n"
         f"응답형식={_common_response_schema(target_type='worker')}"
@@ -309,7 +316,13 @@ def _common_response_schema(*, target_type: str) -> str:
             },
             "visible_people": "",
             "worker_location": "",
-            "abnormal_behavior": "",
+            "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
+            "behavior_observation": {
+                "posture": "upright|leaning|crouching|fallen|unknown",
+                "movement_pattern": "normal|irregular|staggering|stationary|unknown",
+                "confidence": "high|medium|low",
+                "detail": "화면에서 관찰한 자세·이동 패턴 자유 묘사 (한국어)",
+            },
             "visible_risks": [],
             "recommended_action": "",
         }

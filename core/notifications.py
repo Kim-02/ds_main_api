@@ -113,7 +113,6 @@ def extract_vlm_text(result: Any) -> str:
             "summary",
             "reason",
             "health_considerations",
-            "abnormal_behavior",
             "worker_location",
             "rest_reason",
             "recommended_action",
@@ -126,8 +125,25 @@ def extract_vlm_text(result: Any) -> str:
             value = result.get(key)
             if isinstance(value, list):
                 parts.extend(str(item).strip() for item in value if item)
-            elif value and str(value).strip() not in {"none", "unknown"}:
+            elif value and str(value).strip() not in {"none", "unknown", "not_visible"}:
                 parts.append(str(value).strip())
+
+        # 비틀거림·낙상 탐지 시 알림 텍스트에 명시
+        abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
+        if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
+            label = {
+                "staggering": "비틀거림 감지",
+                "falling": "낙상 감지",
+                "slumping": "신체 축 처짐 감지",
+                "leaning": "기댐 감지",
+                "crouching": "쭈그림 감지",
+            }.get(abnormal, abnormal)
+            behavior_obs = result.get("behavior_observation")
+            detail = ""
+            if isinstance(behavior_obs, dict) and behavior_obs.get("detail"):
+                detail = f" — {behavior_obs['detail']}"
+            parts.insert(0, f"[행동 이상] {label}{detail}")
+
         if parts:
             return " | ".join(parts)
         return json.dumps(result, ensure_ascii=False, default=str)
