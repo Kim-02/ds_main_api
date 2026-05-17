@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 from config import settings
@@ -5,6 +7,7 @@ from config import settings
 from .schemas import SensorRegisterReq, SensorUnregisterReq, WorkerWatchRegisterReq
 
 router = APIRouter(prefix="/api/sensors", tags=["sensor-registry"])
+logger = logging.getLogger(__name__)
 
 
 def _parse_jetson_id(value) -> int:
@@ -82,6 +85,12 @@ def register_worker_watch(req: WorkerWatchRegisterReq, request: Request):
     if sensor_type in {"watch", "hb", "heart_rate", "heartbeat"}:
         sensor_type = "heart_band"
     sensor_info["sensor_type"] = sensor_type
+    logger.info(
+        "[WorkerWatchRegister] START via sensor_registry dept_id=%s sensor_id=%s jetson_id=%s",
+        req.dept_id,
+        sensor_info.get("sensor_id"),
+        jetson_id,
+    )
 
     db = request.app.state.db
     try:
@@ -101,6 +110,13 @@ def register_worker_watch(req: WorkerWatchRegisterReq, request: Request):
     watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
     if watch_scheduler is not None:
         watch_scheduler.register(result["sensor_id"])
+    logger.info(
+        "[WorkerWatchRegister] END via sensor_registry dept_id=%s sensor_id=%s sen_id=%s scheduler=%s",
+        req.dept_id,
+        result.get("sensor_id"),
+        result.get("sen_id"),
+        watch_scheduler is not None,
+    )
 
     return {
         "status": "success",

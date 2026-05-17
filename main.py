@@ -23,6 +23,12 @@ class RuntimeLogFilter(logging.Filter):
         "core.cctv_vlm_context",
         "core.watch_pipeline.camera_vlm",
     )
+    TEST_LOGGER_PREFIXES = (
+        "ai.rest",
+        "core.watch_pipeline.runner",
+        "core.sensor_registry",
+        "worker",
+    )
     VLM_MESSAGE_MARKERS = (
         "VLM",
         "vLLM",
@@ -32,6 +38,18 @@ class RuntimeLogFilter(logging.Filter):
         "TemperatureVLMDebug",
         "WatchCameraVLM",
         "autoregressive VLM",
+    )
+    TEST_MESSAGE_MARKERS = (
+        "WatchPipeline",
+        "WatchScheduler",
+        "RestRepository",
+        "RestModelEngine",
+        "WorkerWatchRegister",
+        "sensor→worker",
+        "worker_hr_data",
+        "TEST",
+        "test_main",
+        "LOGGING",
     )
 
     def __init__(self, profile: str):
@@ -53,7 +71,10 @@ class RuntimeLogFilter(logging.Filter):
         if record.name.startswith(self.VLM_LOGGER_PREFIXES):
             return True
 
-        return any(marker in message for marker in self.VLM_MESSAGE_MARKERS)
+        if record.name.startswith(self.TEST_LOGGER_PREFIXES):
+            return True
+
+        return any(marker in message for marker in self.VLM_MESSAGE_MARKERS + self.TEST_MESSAGE_MARKERS)
 
 
 def configure_logging() -> None:
@@ -70,6 +91,7 @@ def configure_logging() -> None:
     if runtime_filter.profile in {"vlm_focus", "vlm-only", "vlm_only"}:
         for logger_name in ("uvicorn.access", "uvicorn.error", "httpx"):
             logging.getLogger(logger_name).setLevel(logging.ERROR)
+    logging.getLogger(__name__).info("[LOGGING] configured profile=%s debug=%s", runtime_filter.profile, settings.debug)
 
 
 configure_logging()

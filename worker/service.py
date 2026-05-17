@@ -1,9 +1,13 @@
 from datetime import datetime
+import logging
 
 from fastapi import HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
 
 from .schemas import AssignHeartBandRequest, WorkerCreate, WorkerUpdate
+
+
+logger = logging.getLogger(__name__)
 
 
 def _row_to_out(row: dict | None) -> dict | None:
@@ -85,6 +89,13 @@ async def assign_heart_band_to_worker(
     dept_id: int,
     data: AssignHeartBandRequest,
 ) -> dict:
+    logger.info(
+        "[WorkerWatchRegister] START dept_id=%s sensor_id=%s jetson_id=%s interval_ms=%s",
+        dept_id,
+        data.sensor_id,
+        data.jetson_id,
+        data.interval_ms,
+    )
     db_handler = request.app.state.db
     mdns_service = getattr(request.app.state, "mdns_sensor_service", None)
     mqtt_service = getattr(request.app.state, "mqtt_sensor_service", None)
@@ -103,6 +114,13 @@ async def assign_heart_band_to_worker(
         )
 
     sensor_info = await _resolve_heart_band_sensor_info(request, sensor_id, data)
+    logger.info(
+        "[WorkerWatchRegister] resolved sensor sensor_id=%s sensor_type=%s source_name=%s mqtt_topic=%s",
+        sensor_id,
+        sensor_info.get("sensor_type"),
+        sensor_info.get("sen_name"),
+        sensor_info.get("mqtt_topic"),
+    )
     if sensor_info.get("sensor_type") != "heart_band":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -115,6 +133,12 @@ async def assign_heart_band_to_worker(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="해당 사번의 작업자를 찾을 수 없습니다.",
         )
+    logger.info(
+        "[WorkerWatchRegister] worker found dept_id=%s name=%s current_sensor_id=%s",
+        dept_id,
+        worker.get("name"),
+        worker.get("sensor_id"),
+    )
     if worker.get("sensor_id") == sensor_id:
         await run_in_threadpool(
             mqtt_service.publish_register,
@@ -125,6 +149,12 @@ async def assign_heart_band_to_worker(
         watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
         if watch_scheduler is not None:
             watch_scheduler.register(sensor_id)
+        logger.info(
+            "[WorkerWatchRegister] END already_mapped dept_id=%s sensor_id=%s scheduler=%s",
+            dept_id,
+            sensor_id,
+            watch_scheduler is not None,
+        )
         return {
             "success": True,
             "message": "이미 해당 작업자에게 연결된 워치입니다.",
@@ -152,8 +182,21 @@ async def assign_heart_band_to_worker(
         result = await run_in_threadpool(
             db_handler.register_sensor_with_worker, sensor_info, jetson_id, dept_id
         )
+        logger.info(
+            "[WorkerWatchRegister] db mapped dept_id=%s sensor_id=%s sen_id=%s jetson_id=%s",
+            dept_id,
+            sensor_id,
+            result.get("sen_id"),
+            jetson_id,
+        )
         await run_in_threadpool(
             mqtt_service.publish_register,
+            sensor_id,
+            _format_site_id(jetson_id),
+            data.interval_ms,
+        )
+        logger.info(
+            "[WorkerWatchRegister] mqtt register sent sensor_id=%s site_id=%s interval_ms=%s",
             sensor_id,
             _format_site_id(jetson_id),
             data.interval_ms,
@@ -162,6 +205,12 @@ async def assign_heart_band_to_worker(
         watch_scheduler = getattr(request.app.state, "watch_scheduler", None)
         if watch_scheduler is not None:
             watch_scheduler.register(sensor_id)
+        logger.info(
+            "[WorkerWatchRegister] END success dept_id=%s sensor_id=%s scheduler=%s",
+            dept_id,
+            sensor_id,
+            watch_scheduler is not None,
+        )
 
         return {"success": True, "message": "워치 등록 및 작업자 매핑이 완료되었습니다.", "data": result}
 
@@ -197,12 +246,17 @@ async def _resolve_heart_band_sensor_info(
     sensor_info = None
     if mdns_service is not None:
         sensor_info = getattr(mdns_service, "discovered_sensors", {}).get(sensor_id)
+        if sensor_info:
+            logger.info("[WorkerWatchRegister] sensor source=mDNS sensor_id=%s", sensor_id)
 
     if not sensor_info:
         sensor_info = await run_in_threadpool(db_handler.get_sensor_by_sensor_id, sensor_id)
+        if sensor_info:
+            logger.info("[WorkerWatchRegister] sensor source=DB sensor_id=%s", sensor_id)
 
     if not sensor_info:
         sensor_info = {}
+        logger.info("[WorkerWatchRegister] sensor source=request_payload sensor_id=%s", sensor_id)
 
     merged = dict(sensor_info)
     request_data = data.model_dump(exclude_none=True)
@@ -264,6 +318,7 @@ def _format_site_id(jetson_id: int | str) -> str:
 
 
 async def unassign_worker_sensor(request: Request, dept_id: int) -> dict:
+    logger.info("[WorkerWatchRegister] START unassign dept_id=%s", dept_id)
     db_handler = request.app.state.db
     worker = await run_in_threadpool(db_handler.get_worker_by_dept_id, dept_id)
     if not worker:
@@ -285,4 +340,5 @@ async def unassign_worker_sensor(request: Request, dept_id: int) -> dict:
     if watch_scheduler is not None and sensor_id:
         watch_scheduler.unregister(sensor_id)
 
+    logger.info("[WorkerWatchRegister] END unassign dept_id=%s sensor_id=%s", dept_id, sensor_id)
     return {"success": True, "message": "작업자 센서 매핑이 해제되었습니다."}
