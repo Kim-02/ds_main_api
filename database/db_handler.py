@@ -2199,6 +2199,7 @@ class DatabaseHandler:
                             p.sensor_id,
                             p.x_ratio,
                             p.y_ratio,
+                            s.sen_id,
                             s.sen_name,
                             s.sensor_type,
                             s.sen_locate,
@@ -2234,6 +2235,72 @@ class DatabaseHandler:
 
         except Exception as e:
             logging.error("get_sensor_positions_by_map_id 오류: %s", e)
+            return []
+
+    def get_available_cctvs_for_map(
+        self, space_id: int, map_id: Optional[int] = None
+    ) -> list[dict]:
+        """space_id 기준 배치 가능한 CCTV 목록을 반환한다.
+
+        map_id를 전달하면 해당 맵에 이미 배치된 CCTV에 placed=1을 함께 반환한다.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if map_id is not None:
+                        cursor.execute(
+                            """
+                            SELECT
+                                s.sen_id,
+                                s.sensor_id,
+                                s.sen_name,
+                                s.sen_locate,
+                                s.sensor_type,
+                                s.is_online,
+                                c.ip_address,
+                                c.camera_id,
+                                c.health,
+                                IF(p.sensor_id IS NOT NULL, 1, 0) AS placed,
+                                p.x_ratio,
+                                p.y_ratio
+                            FROM camera_info c
+                            JOIN sensor s ON c.sen_id = s.sen_id
+                            LEFT JOIN sensor_map_position p
+                                ON p.sensor_id = s.sensor_id AND p.map_id = %s
+                            WHERE COALESCE(c.space_id, s.space_id) = %s
+                              AND s.sensor_type IN ('camera', 'cctv')
+                            ORDER BY s.sen_name
+                            """,
+                            (map_id, space_id),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            SELECT
+                                s.sen_id,
+                                s.sensor_id,
+                                s.sen_name,
+                                s.sen_locate,
+                                s.sensor_type,
+                                s.is_online,
+                                c.ip_address,
+                                c.camera_id,
+                                c.health,
+                                0 AS placed,
+                                NULL AS x_ratio,
+                                NULL AS y_ratio
+                            FROM camera_info c
+                            JOIN sensor s ON c.sen_id = s.sen_id
+                            WHERE COALESCE(c.space_id, s.space_id) = %s
+                              AND s.sensor_type IN ('camera', 'cctv')
+                            ORDER BY s.sen_name
+                            """,
+                            (space_id,),
+                        )
+                    return cursor.fetchall()
+
+        except Exception as e:
+            logging.error("get_available_cctvs_for_map 오류: %s", e)
             return []
 
     def get_registered_sensors_by_jetson_id(

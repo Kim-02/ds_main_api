@@ -24,6 +24,20 @@ def get_floor_map_by_space(space_id: int, request: Request):
     return {"status": "success", "data": floor_map}
 
 
+@router.get("/space/{space_id}/available-cctvs", summary="공간 기준 배치 가능한 CCTV 조회")
+def get_available_cctvs_by_space(
+    space_id: int,
+    request: Request,
+    map_id: Optional[int] = Query(None, description="배치 여부(placed)를 확인할 map_id"),
+):
+    """space_id에 속한 CCTV 목록을 반환합니다.
+
+    map_id를 함께 전달하면 각 CCTV의 배치 여부(placed)와 현재 좌표도 반환합니다.
+    """
+    cctvs = request.app.state.db.get_available_cctvs_for_map(space_id, map_id=map_id)
+    return {"status": "success", "data": cctvs}
+
+
 @router.get("/space/{space_id}/available-sensors", summary="공간 기준 배치 가능한 온습도 센서 조회")
 def get_available_sensors_by_space(
     space_id: int,

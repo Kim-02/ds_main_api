@@ -1,6 +1,8 @@
 from typing import Optional
 
-from fastapi import APIRouter, Query, Request, status
+import cv2
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from . import service
 from .schemas import (
@@ -52,6 +54,48 @@ def register_camera_from_app(
     request: Request,
 ):
     return service.register_camera_from_app(request.app.state.db, data)
+
+
+@router.get(
+    "/{sen_id}/stream",
+    summary="CCTV MJPEG 스트리밍",
+)
+def stream_camera_mjpeg(sen_id: int, request: Request):
+    """RTSP 스트림을 MJPEG로 변환하여 HTTP로 전달합니다.
+
+    Android WebView의 <img src="..."> 태그로 바로 표시할 수 있습니다.
+    """
+    row = request.app.state.db.get_cctv_by_sen_id(sen_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="CCTV를 찾을 수 없습니다.")
+
+    rtsp_url = service.build_rtsp_url(
+        ip_address=str(row["ip_address"]),
+        username=str(row["camera_id"]),
+        password=str(row["camera_pw"]),
+    )
+
+    def _generate_frames():
+        cap = cv2.VideoCapture(rtsp_url)
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + jpeg.tobytes()
+                    + b"\r\n"
+                )
+        finally:
+            cap.release()
+
+    return StreamingResponse(
+        _generate_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 @router.get(
