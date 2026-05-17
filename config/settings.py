@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     cctv_vlm_request_image_max_side: int = 512
 
     # Fire pipeline (CCTV 화재 감지 전용)
-    fire_pipeline_enabled: bool = True
+    fire_pipeline_enabled: bool = False
     fire_pipeline_yolo_model_path: str = "0507_best.engine"
     fire_pipeline_vllm_base_url: str = ""
     fire_pipeline_vllm_model: str = ""

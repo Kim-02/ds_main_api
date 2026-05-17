@@ -39,6 +39,7 @@ def build_vlm_prompt(
 def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | None) -> str:
     return (
         "분석 명칭: autoregressive VLM.\n"
+        "반드시 모든 응답 필드 값을 한국어로 작성하세요. 영어 사용 금지.\n"
         "산업 안전 안내만 작성, 의료 진단 금지. 가능성/주의/관리자 확인 표현을 사용하세요.\n"
         "현재 CCTV 이미지 우선, YOLO 10초 정규화는 보조 근거. 보이지 않는 사람/객체/누출/화재를 확정하지 마세요.\n"
         "등록 위험물은 공간 속성입니다. 화면에 누출/가스가 없으면 존재/부재를 단정하지 마세요.\n"
@@ -88,6 +89,7 @@ def build_retry_prompt(camera: dict, trigger: dict, yolo_context: dict, *, mode:
     target_type = "site" if mode == "environment" else "worker"
     prompt = (
         "분석 명칭: autoregressive VLM. 의료 진단 금지, 산업 안전 안내만 작성.\n"
+        "반드시 모든 응답 필드 값을 한국어로 작성하세요. 영어 사용 금지.\n"
         "현재 이미지가 최우선, YOLO 이력은 보조 근거입니다. 보이지 않는 위험은 확정하지 마세요.\n"
         f"판단유형={mode}, target.type={target_type}. 코드블록 없이 JSON 하나만 답하세요.\n"
         f"응답형식={_common_response_schema(target_type=target_type)}\n"
