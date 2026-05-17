@@ -176,13 +176,12 @@ class TemperatureCameraVlmManager:
         # VLM 결과에서 핵심 정보 추출
         message_text = extract_vlm_text(result) or payload.get("text") or "온습도 이상 감지 - VLM 분석 완료"
         risk_level = result.get("risk_level") if isinstance(result, dict) else None
-        hazard_warning = result.get("hazard_warning") if isinstance(result, dict) else None
 
         # level 결정: danger / warning / info
         if risk_level in {"high", "critical"}:
             level = "danger"
             title = "온습도 위험 감지"
-        elif risk_level == "medium" or _has_meaningful_text(hazard_warning):
+        elif risk_level == "medium":
             level = "warning"
             title = "온습도 주의 감지"
         else:
@@ -233,11 +232,6 @@ class TemperatureCameraVlmManager:
             source="temperature_vlm",
             vibration=vibration,
             vlm_result=result,
-            hazard_material=result.get("hazard_material") if isinstance(result, dict) else "",
-            hazard_warning=result.get("hazard_warning") if isinstance(result, dict) else "",
-            hazard_specific_action=result.get("hazard_specific_action") if isinstance(result, dict) else "",
-            evacuation_route=result.get("evacuation_route") if isinstance(result, dict) else "",
-            abnormal_behavior=result.get("abnormal_behavior") if isinstance(result, dict) else "",
             detection_info=_as_dict(result.get("detection_info")) if isinstance(result, dict) else {},
             person_movement=_as_dict(result.get("person_movement")) if isinstance(result, dict) else {},
             environment_detections=_as_dict(result.get("environment_detections")) if isinstance(result, dict) else {},
@@ -814,12 +808,8 @@ def _normalize_temperature_vlm_result(
 ) -> dict:
     normalized = dict(result)
     hazard_context = _build_hazard_context(camera, last_trigger)
-    hazard_type = str(hazard_context.get("hazard_type") or "").strip()
-    is_hazard = _as_bool(hazard_context.get("is_hazard"))
     sample = hazard_context.get("sample") if isinstance(hazard_context.get("sample"), dict) else {}
-    temp = sample.get("temp")
     space_name = hazard_context.get("space_name") or camera.get("space_name") or "작업장"
-    guide = _hazard_response_guide(hazard_type)
     detection_info = _build_detection_info_from_yolo(yolo_context or {})
     health_attention = (
         hazard_context.get("health_attention")
@@ -834,128 +824,52 @@ def _normalize_temperature_vlm_result(
         "type": "site",
         "site_id": hazard_context.get("space_id") or camera.get("space_id"),
         "site_name": space_name,
-        "worker_id": None,
-        "worker_name": None,
     }
-    normalized.setdefault("reason", "작업장 온습도/열지수와 현장 건강 취약 작업자 존재 여부를 함께 고려한 현장 단위 위험 안내입니다.")
 
-    if temp is not None:
-        normalized.setdefault("temperature_status", "high")
-        normalized.setdefault(
-            "environment_status",
-            {
-                "temperature_c": temp,
-                "humidity_percent": sample.get("humid"),
-                "heat_index_c": hazard_context.get("heat_index"),
-                "status": "danger" if normalized.get("risk_level") in {"high", "critical"} else "caution",
-            },
-        )
-
-    summary = str(normalized.get("summary") or "").strip()
-    if (
-        _summary_confuses_worker_temperature(summary)
-        or _summary_confuses_hazard_distribution(summary, hazard_type)
-    ):
-        normalized["summary"] = _temperature_summary(space_name, temp, hazard_type if is_hazard else "")
-    elif not summary:
-        normalized["summary"] = _temperature_summary(space_name, temp, hazard_type if is_hazard else "")
+    if not _has_meaningful_text(normalized.get("summary")):
+        normalized["summary"] = _temperature_summary(space_name, sample.get("temp"), "")
 
     if detection_info:
         normalized["detection_info"] = detection_info
-        normalized["detection_text"] = detection_info.get("text", "")
         normalized["environment_detections"] = detection_info.get("environment_detections", {})
         normalized["person_movement"] = detection_info.get("person_movement", {})
-        if detection_info.get("visible_people"):
-            normalized["visible_people"] = detection_info.get("visible_people")
+        if not _has_meaningful_text(normalized.get("worker_movements")):
+            normalized["worker_movements"] = detection_info.get("text", "")
 
-    visible_risks = normalized.get("visible_risks")
-    if isinstance(visible_risks, list):
-        cleaned = [
-            str(item)
-            for item in visible_risks
-            if str(item).strip().lower() not in {"heat_source", "temperature", "high_temperature"}
-        ]
-        normalized["visible_risks"] = cleaned or ["none"]
-    if detection_info:
-        yolo_risks = detection_info.get("visible_risks") or []
-        if yolo_risks and yolo_risks != ["none"]:
-            existing = normalized.get("visible_risks")
-            existing_list = existing if isinstance(existing, list) else []
-            merged = []
-            for item in existing_list + yolo_risks:
-                if item and item != "none" and item not in merged:
-                    merged.append(item)
-            normalized["visible_risks"] = merged or ["none"]
+    if health_attention and not _has_meaningful_text(normalized.get("health_risk_summary")):
+        normalized["health_risk_summary"] = health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요"
 
-    if is_hazard and hazard_type and hazard_type not in {"none", "unknown"}:
-        normalized["hazard_material"] = hazard_type
-        if not _has_meaningful_text(normalized.get("hazard_warning")):
-            normalized["hazard_warning"] = f"{hazard_type} 유의관리지역입니다. {guide}"
-        elif hazard_type not in str(normalized.get("hazard_warning")):
-            normalized["hazard_warning"] = f"{hazard_type}: {normalized.get('hazard_warning')}"
+    if not isinstance(normalized.get("worker_risks"), list):
+        normalized["worker_risks"] = []
 
-        if not _has_meaningful_text(normalized.get("hazard_specific_action")):
-            normalized["hazard_specific_action"] = guide
-        elif hazard_type not in str(normalized.get("hazard_specific_action")):
-            normalized["hazard_specific_action"] = f"{hazard_type}: {normalized.get('hazard_specific_action')}"
+    if not isinstance(normalized.get("recommended_actions"), list):
+        normalized["recommended_actions"] = []
 
-        if normalized.get("risk_level") in {None, "", "low", "unknown"} and temp is not None:
-            normalized["risk_level"] = "medium"
-    else:
-        normalized.setdefault("hazard_material", "none")
-
-    if health_attention:
-        if not _has_meaningful_text(normalized.get("health_considerations")):
-            normalized["health_considerations"] = health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요"
-    elif not _has_meaningful_text(normalized.get("health_considerations")):
-        normalized["health_considerations"] = "현장 건강 취약 작업자 정보 없음"
-
-    recommended_actions = normalized.get("recommended_actions")
-    if isinstance(recommended_actions, list) and recommended_actions:
-        normalized.setdefault("recommended_action", str(recommended_actions[0]))
-
-    normalized.setdefault("abnormal_behavior", "unknown")
-    normalized.setdefault("evacuation_route", "unknown")
     return normalized
 
 
 def _compose_temperature_alert_message(result: dict) -> str:
     parts = []
     summary = str(result.get("summary") or "").strip()
-    detection_text = str(result.get("detection_text") or "").strip()
-    hazard_warning = str(result.get("hazard_warning") or "").strip()
-    hazard_action = str(result.get("hazard_specific_action") or "").strip()
-    health = str(result.get("health_considerations") or "").strip()
-    reason = str(result.get("reason") or "").strip()
-    abnormal = str(result.get("abnormal_behavior") or "").strip()
-    evacuation = str(result.get("evacuation_route") or "").strip()
-    recommended = str(result.get("recommended_action") or "").strip()
+    field_status = str(result.get("field_status") or "").strip()
+    worker_movements = str(result.get("worker_movements") or "").strip()
+    health_risk_summary = str(result.get("health_risk_summary") or "").strip()
     recommended_actions = result.get("recommended_actions")
 
     if summary:
-        parts.append(summary)
-    if reason:
-        parts.append(f"이유: {reason}")
-    if health:
-        parts.append(f"건강 유의: {health}")
-    if detection_text:
-        parts.append(f"탐지: {detection_text}")
-    if _has_meaningful_text(abnormal) and abnormal not in {"none", "unknown"}:
-        parts.append(f"작업자 이상행동: {abnormal}")
-    if _has_meaningful_text(hazard_warning):
-        parts.append(f"위험물 경고: {hazard_warning}")
-    if _has_meaningful_text(hazard_action):
-        parts.append(f"위험물 대처: {hazard_action}")
-    if _has_meaningful_text(evacuation):
-        parts.append(f"대피: {evacuation}")
-    if _has_meaningful_text(recommended):
-        parts.append(f"조치: {recommended}")
+        parts.append(f"[현장] {summary}")
+    if field_status and field_status != summary:
+        parts.append(f"현장 상태: {field_status}")
+    if worker_movements and worker_movements not in {"none", "unknown"}:
+        parts.append(f"작업자 동향: {worker_movements}")
+    if health_risk_summary:
+        parts.append(f"건강 위험: {health_risk_summary}")
     if isinstance(recommended_actions, list):
         for action in recommended_actions[:2]:
-            if _has_meaningful_text(action):
+            if _has_meaningful_text(str(action)):
                 parts.append(f"조치: {action}")
 
-    return _limit_text(" ".join(parts), 650) if parts else "온습도 이상 감지 - VLM 분석 완료"
+    return _limit_text(" | ".join(parts), 650) if parts else "온습도 이상 감지 - VLM 분석 완료"
 
 
 def _build_detection_info_from_yolo(yolo_context: dict) -> dict:

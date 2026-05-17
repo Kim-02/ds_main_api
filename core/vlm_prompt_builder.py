@@ -54,10 +54,11 @@ def build_environment_health_prompt(camera: dict, trigger: dict, yolo_context: d
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "판단유형=environment\n"
-        "관점: 현장 단위 건강 주의 판단입니다. 특정 작업자에게 문제가 발생했다고 단정하지 마세요.\n"
-        "이 판단에서는 작업장 온도/습도/열지수 등 환경 데이터는 사용하지 마세요.\n"
-        "개인 건강 데이터와 건강 취약 작업자 존재 여부, 화면상 행동, 현장 위험, 관리자 조치, 작업자 안내만 설명하세요.\n"
-        "건강 취약 작업자가 있더라도 화면상 이상행동이 명확하지 않으면 확인 필요로 표현하세요.\n"
+        "관점: 현장 단위 건강 주의 판단입니다. 아래 두 가지를 각각 분리해서 판단하세요.\n"
+        "① CCTV 영상 기반: 현재 현장 상태(field_status)와 작업자 동향(worker_movements)을 화면에서 직접 묘사하세요.\n"
+        "② DB 건강 정보 기반: health_attention 데이터를 참고하여 작업자별 건강 위험(worker_risks)과 전체 요약(health_risk_summary)을 작성하세요.\n"
+        "특정 작업자에게 문제가 발생했다고 단정하지 마세요. 화면에 이상행동이 명확하지 않으면 '확인 필요'로 표현하세요.\n"
+        "관리자가 즉시 행동할 수 있도록 recommended_actions를 구체적으로 작성하세요.\n"
         f"현장건강이벤트={json_dumps(context)}\n"
         "코드블록 없이 JSON 하나만 출력하세요.\n"
         f"응답형식={_common_response_schema(target_type='site')}"
@@ -106,32 +107,18 @@ def compact_environment_trigger_for_prompt(camera: dict, trigger: dict) -> dict:
         else {}
     )
 
-    hazard_type = str(prediction.get("hazard_type") or camera.get("hazard_type") or "").strip()
-    is_hazard = as_bool(
-        prediction.get("is_hazard")
-        if prediction.get("is_hazard") is not None
-        else camera.get("is_hazard")
-    )
-
     return {
         "target": {
             "type": "site",
             "site_id": prediction.get("space_id") or camera.get("space_id"),
             "site_name": prediction.get("space_name") or camera.get("space_name"),
-            "worker_id": None,
-            "worker_name": None,
         },
         "health_attention": {
-            "attention_worker_count": health_attention.get("attention_worker_count", 0),
             "total_worker_count": health_attention.get("total_worker_count", 0),
-            "risk_factors": health_attention.get("risk_factors", {}),
+            "attention_worker_count": health_attention.get("attention_worker_count", 0),
             "abnormal_hr_count": health_attention.get("abnormal_hr_count", 0),
+            "risk_factors": health_attention.get("risk_factors", {}),
             "summary": health_attention.get("summary", "건강상 주의가 필요한 작업자 정보 없음"),
-        },
-        "hazard": {
-            "is_hazard": is_hazard,
-            "hazard_type": hazard_type or ("unknown" if is_hazard else "none"),
-            "response_guide": hazard_response_guide(hazard_type) if is_hazard else "",
         },
         "triggered_at": prediction.get("triggered_at") or trigger.get("triggered_at"),
     }
@@ -289,39 +276,43 @@ def _prediction_or_trigger(trigger: dict) -> dict:
 
 
 def _common_response_schema(*, target_type: str) -> str:
-    worker_id_value = "작업자 ID" if target_type == "worker" else None
-    worker_name_value = "작업자명" if target_type == "worker" else None
-    schema = {
-        "risk_level": "",
-        "summary": "",
-        "reason": "",
-        "health_considerations": "",
-        "recommended_actions": [],
-        "target": {
-            "type": target_type,
-            "site_id": "",
-            "site_name": "",
-            "worker_id": worker_id_value,
-            "worker_name": worker_name_value,
-        },
-        "visible_people": "",
-        "person_actions": [],
-        "worker_location": "",
-        "abnormal_behavior": "",
-        "visible_risks": [],
-        "environment_status": {
-            "temperature_c": None,
-            "humidity_percent": None,
-            "heat_index_c": None,
-            "status": "",
-        },
-        "detection_info": "",
-        "hazard_material": "",
-        "hazard_warning": "",
-        "hazard_specific_action": "",
-        "evacuation_route": "",
-        "recommended_action": "",
-    }
+    if target_type == "site":
+        schema = {
+            "risk_level": "none|low|medium|high|critical 중 하나",
+            "summary": "관리자용 한 줄 현장 요약",
+            "field_status": "CCTV 기반 현장 상태 묘사",
+            "worker_movements": "CCTV 기반 작업자 동향 묘사",
+            "health_risk_summary": "DB 기반 전체 건강 위험 요약",
+            "worker_risks": [
+                {"worker_name": "작업자명 또는 익명", "risk_factors": ["위험요인"], "note": "비고"}
+            ],
+            "recommended_actions": ["관리자 즉시 조치사항"],
+            "target": {
+                "type": "site",
+                "site_id": "",
+                "site_name": "",
+            },
+        }
+    else:
+        schema = {
+            "risk_level": "none|low|medium|high|critical 중 하나",
+            "summary": "",
+            "reason": "",
+            "health_considerations": "",
+            "recommended_actions": [],
+            "target": {
+                "type": "worker",
+                "site_id": "",
+                "site_name": "",
+                "worker_id": "작업자 ID",
+                "worker_name": "작업자명",
+            },
+            "visible_people": "",
+            "worker_location": "",
+            "abnormal_behavior": "",
+            "visible_risks": [],
+            "recommended_action": "",
+        }
     return json_dumps(schema)
 
 

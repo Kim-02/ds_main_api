@@ -103,17 +103,17 @@ def extract_vlm_text(result: Any) -> str:
         return result.strip()
 
     if isinstance(result, dict):
+        target_type = (result.get("target") or {}).get("type") if isinstance(result.get("target"), dict) else None
+
+        if target_type == "site":
+            return _extract_site_vlm_text(result)
+
         parts = []
         for key in (
             "summary",
             "reason",
             "health_considerations",
-            "hazard_warning",
-            "hazard_specific_action",
-            "evacuation_route",
             "abnormal_behavior",
-            "detection_info",
-            "detection_text",
             "worker_location",
             "rest_reason",
             "recommended_action",
@@ -126,13 +126,38 @@ def extract_vlm_text(result: Any) -> str:
             value = result.get(key)
             if isinstance(value, list):
                 parts.extend(str(item).strip() for item in value if item)
-            elif value:
+            elif value and str(value).strip() not in {"none", "unknown"}:
                 parts.append(str(value).strip())
         if parts:
-            return " / ".join(parts)
+            return " | ".join(parts)
         return json.dumps(result, ensure_ascii=False, default=str)
 
     if isinstance(result, list):
         return json.dumps(result, ensure_ascii=False, default=str)
 
     return str(result)
+
+
+def _extract_site_vlm_text(result: dict) -> str:
+    """environment(site) 모드 VLM 결과를 관리자 알림 텍스트로 변환한다."""
+    parts = []
+    summary = str(result.get("summary") or "").strip()
+    field_status = str(result.get("field_status") or "").strip()
+    worker_movements = str(result.get("worker_movements") or "").strip()
+    health_risk_summary = str(result.get("health_risk_summary") or "").strip()
+    recommended_actions = result.get("recommended_actions")
+
+    if summary:
+        parts.append(f"[현장] {summary}")
+    if field_status and field_status != summary:
+        parts.append(f"현장 상태: {field_status}")
+    if worker_movements and worker_movements not in {"none", "unknown"}:
+        parts.append(f"작업자 동향: {worker_movements}")
+    if health_risk_summary:
+        parts.append(f"건강 위험: {health_risk_summary}")
+    if isinstance(recommended_actions, list):
+        for action in recommended_actions[:2]:
+            if action and str(action).strip():
+                parts.append(f"조치: {action}")
+
+    return " | ".join(parts) if parts else ""
