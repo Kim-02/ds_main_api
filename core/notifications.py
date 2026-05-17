@@ -106,6 +106,8 @@ def extract_vlm_text(result: Any) -> str:
         parts = []
         for key in (
             "summary",
+            "reason",
+            "health_considerations",
             "hazard_warning",
             "hazard_specific_action",
             "evacuation_route",
@@ -115,13 +117,16 @@ def extract_vlm_text(result: Any) -> str:
             "worker_location",
             "rest_reason",
             "recommended_action",
+            "recommended_actions",
             "situation",
             "evidence",
             "raw_text",
             "text",
         ):
             value = result.get(key)
-            if value:
+            if isinstance(value, list):
+                parts.extend(str(item).strip() for item in value if item)
+            elif value:
                 parts.append(str(value).strip())
         if parts:
             return " / ".join(parts)

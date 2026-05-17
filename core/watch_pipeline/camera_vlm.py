@@ -22,6 +22,16 @@ from core.cctv_vlm_context import (
     public_yolo_context,
 )
 from core.notifications import make_vlm_push_payload
+from core.vlm_prompt_builder import (
+    build_common_autoregressive_vlm_prompt as shared_build_common_autoregressive_vlm_prompt,
+    build_retry_prompt as shared_build_retry_prompt,
+    build_worker_regression_prompt,
+    compact_camera_for_prompt as shared_compact_camera_for_prompt,
+    extract_hazard_type as shared_extract_hazard_type,
+    format_yolo_context_for_prompt as shared_format_yolo_context_for_prompt,
+    health_risk_factor_names as shared_health_risk_factor_names,
+    limit_text as shared_limit_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -468,7 +478,7 @@ class WatchCameraVlmSession:
         except Exception as exc:
             if not _is_prompt_too_long_error(exc):
                 raise
-            retry_prompt = _build_retry_prompt(self.camera, self._last_trigger, yolo_context)
+            retry_prompt = _build_retry_prompt(self.camera, self._last_trigger, yolo_context, self.event_type)
             logger.warning(
                 "[WatchCameraVLM] prompt too long, retry with compact prompt camera_sen_id=%s original_chars=%s retry_chars=%s error=%s",
                 self.camera.get("sen_id"),
@@ -490,7 +500,10 @@ class WatchCameraVlmSession:
             text,
         )
         try:
-            return extract_json(text)
+            result = extract_json(text)
+            if isinstance(result, dict):
+                return _normalize_worker_regression_vlm_result(result, self.camera, self._last_trigger, yolo_context)
+            return result
         except Exception as exc:
             logger.warning("[WatchCameraVLM] JSON response parse failed: %s", exc)
             return {"raw_text": text}
@@ -534,45 +547,11 @@ def _get_video_runtime_cameras_by_space_id(space_id: int) -> list[dict]:
 
 
 def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | None) -> str:
-    return (
-        "분석: autoregressive VLM. 현재 CCTV 이미지가 최우선, YOLO 10초 정규화는 이동/위험 흐름 보조입니다.\n"
-        "현재 이미지에 안 보이는 사람/객체를 확정하지 마세요.\n"
-        "화재/연기/열원은 현재 이미지 또는 YOLO정규화텍스트에 근거가 있을 때만 확정하세요.\n"
-        f"카메라={json.dumps(_compact_camera_for_prompt(camera), ensure_ascii=False, default=str)}\n"
-        f"{_format_yolo_context_for_prompt(yolo_context)}\n"
-    )
+    return shared_build_common_autoregressive_vlm_prompt(camera, yolo_context)
 
 
 def _build_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
-    trigger_json = _limit_text(
-        json.dumps(_compact_watch_trigger_for_prompt(trigger), ensure_ascii=False, default=str),
-        850,
-    )
-    return (
-        build_common_autoregressive_vlm_prompt(camera, yolo_context)
-        + "이벤트별 목적: 휴식 권고가 발생한 작업자와 같은 공간을 감시하여 이상 행동/위험 상황을 관리자 앱에 전달하는 것입니다.\n"
-        "현재 CCTV 화면과 YOLO정규화텍스트를 함께 보고, 사람 이동/행동/위험요소/조치 필요성을 JSON 하나로만 답하세요.\n"
-        "휴식 권고 대상 작업자를 화면에서 특정할 수 없으면 worker_location은 same_space_unknown으로 쓰세요.\n"
-        "심박·온습도·개인 건강정보는 휴식 권고 이유 설명에만 쓰고, 화면에 보이지 않는 증상은 단정하지 마세요.\n"
-        "불확실한 내용은 추측하지 말고 unknown 또는 빈 배열로 표시하세요.\n"
-        "코드블록 없이 JSON만 출력하세요.\n"
-        "응답 형식:\n"
-        "{"
-        "\"summary\":\"현재 작업장 상태 한 문장\","
-        "\"risk_level\":\"low|medium|high|unknown\","
-        "\"rest_recommendation\":\"약한휴식권고|강한휴식권고|반드시 휴식|unknown\","
-        "\"rest_reason\":\"심박/온습도/개인위험 기반 휴식 필요 이유 한 문장\","
-        "\"worker_location\":\"화면상 위치 또는 same_space_unknown\","
-        "\"visible_people\":\"none|one|multiple|unknown\","
-        "\"person_actions\":[\"standing\",\"walking\",\"working\",\"sitting\",\"lying\",\"unknown\"],"
-        "\"movement\":\"left|right|toward_camera|away_from_camera|stationary|unknown\","
-        "\"abnormal_behavior\":\"none|staggering|falling|lying_down|unsafe_posture|unknown\","
-        "\"visible_risks\":[\"fire\",\"smoke\",\"fall\",\"crowding\",\"unsafe_posture\",\"none\"],"
-        "\"detection_info\":\"YOLO와 화면 기반 탐지 요약 한 문장\","
-        "\"recommended_action\":\"필요 조치 한 문장\""
-        "}\n"
-        f"휴식권고={trigger_json}"
-    )
+    return build_worker_regression_prompt(camera, trigger, yolo_context)
 
 
 def _compact_watch_trigger_for_prompt(trigger: dict) -> dict:
@@ -627,34 +606,11 @@ def _call_prompt_builder(
 
 
 def _format_yolo_context_for_prompt(yolo_context: dict | None) -> str:
-    if not yolo_context:
-        return "YOLO정규화메타={}\nYOLO정규화텍스트=\n[YOLO compact history]\nmissing"
-
-    public = public_yolo_context(yolo_context)
-    metadata = {
-        "source": public.get("source"),
-        "camera_id": public.get("camera_id"),
-        "frame_count": public.get("frame_count"),
-        "sampled_count": public.get("sampled_count"),
-        "generated_at": public.get("generated_at"),
-        "normalized_text_length": public.get("normalized_text_length"),
-    }
-    detection_summary = public.get("detection_summary") or {}
-    text = str(yolo_context.get("normalized_text") or "")
-    max_chars = int(getattr(settings, "cctv_vlm_yolo_context_prompt_max_chars", 2600) or 2600)
-    return (
-        f"YOLO정규화메타={json.dumps(metadata, ensure_ascii=False, default=str)}\n"
-        f"YOLO탐지요약={json.dumps(detection_summary, ensure_ascii=False, default=str)}\n"
-        "YOLO정규화텍스트=\n"
-        f"{_limit_text(text, max_chars)}"
-    )
+    return shared_format_yolo_context_for_prompt(yolo_context)
 
 
 def _limit_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    marker = "\n...[truncated]"
-    return text[: max(0, max_chars - len(marker))] + marker
+    return shared_limit_text(text, max_chars)
 
 
 def _limit_prompt_for_vlm(prompt: str) -> str:
@@ -670,42 +626,13 @@ def _limit_prompt_for_vlm(prompt: str) -> str:
     return _limit_text(prompt, max_chars)
 
 
-def _build_retry_prompt(camera: dict, trigger: dict, yolo_context: dict) -> str:
-    max_chars = int(getattr(settings, "camera_vlm_retry_prompt_max_chars", 900) or 900)
-    camera_text = json.dumps(_compact_camera_for_prompt(camera), ensure_ascii=False, default=str)
-    trigger_text = _limit_text(json.dumps(trigger, ensure_ascii=False, default=str), 260)
-    yolo_text = _limit_text(str(yolo_context.get("normalized_text") or ""), 360)
-    hazard_type = _extract_hazard_type(camera, trigger)
-    prompt = (
-        "분석 명칭: autoregressive VLM.\n"
-        "현재 CCTV 이미지가 최우선입니다. YOLO 이력은 보조 근거입니다.\n"
-        "화재/연기/열원은 보일 때만 확정하세요. 온도센서 값은 작업자 체온이 아니라 작업장 환경 온도입니다.\n"
-        "등록위험물이 있으면 위험물별 경고와 대처를 반드시 포함하세요. 코드블록 금지.\n"
-        "JSON 하나만 답하세요: "
-        "{\"summary\":\"한 문장\",\"risk_level\":\"low|medium|high|unknown\","
-        "\"visible_people\":\"none|one|multiple|unknown\","
-        "\"visible_risks\":[\"fire\",\"smoke\",\"unsafe_posture\",\"none\"],"
-        "\"hazard_material\":\"위험물명 또는 none\","
-        "\"evacuation_route\":\"대피 경로 또는 unknown\","
-        "\"hazard_warning\":\"위험물 경고 또는 none\","
-        "\"hazard_specific_action\":\"위험물별 대처 한 문장\","
-        "\"recommended_action\":\"조치 한 문장\"}\n"
-        f"카메라={camera_text}\n"
-        f"등록위험물={hazard_type}\n"
-        f"이벤트={trigger_text}\n"
-        f"YOLO={yolo_text}"
-    )
-    return _limit_text(prompt, max_chars)
+def _build_retry_prompt(camera: dict, trigger: dict, yolo_context: dict, event_type: str = "watch_camera_vlm") -> str:
+    mode = "environment" if event_type == "temperature_camera_vlm" else "worker_regression"
+    return shared_build_retry_prompt(camera, trigger, yolo_context, mode=mode)
 
 
 def _extract_hazard_type(camera: dict, trigger: dict) -> str:
-    if isinstance(trigger, dict):
-        prediction = trigger.get("prediction")
-        if isinstance(prediction, dict) and prediction.get("hazard_type"):
-            return str(prediction.get("hazard_type"))
-        if trigger.get("hazard_type"):
-            return str(trigger.get("hazard_type"))
-    return str(camera.get("hazard_type") or "none")
+    return shared_extract_hazard_type(camera, trigger)
 
 
 def _is_prompt_too_long_error(exc: Exception) -> bool:
@@ -715,6 +642,69 @@ def _is_prompt_too_long_error(exc: Exception) -> bool:
         or "decoder prompt" in text
         or "prompt" in text and "longer" in text
     )
+
+
+def _normalize_worker_regression_vlm_result(
+    result: dict,
+    camera: dict,
+    last_trigger: dict,
+    yolo_context: dict | None = None,
+) -> dict:
+    normalized = dict(result)
+    prediction = last_trigger.get("prediction") if isinstance(last_trigger, dict) else {}
+    if not isinstance(prediction, dict):
+        prediction = {}
+    worker = prediction.get("worker") if isinstance(prediction.get("worker"), dict) else {}
+    measurements = prediction.get("measurements") if isinstance(prediction.get("measurements"), dict) else {}
+    health_profile = prediction.get("health_profile") if isinstance(prediction.get("health_profile"), dict) else {}
+
+    if normalized.get("risk_level") is not None:
+        normalized["risk_level"] = str(normalized.get("risk_level")).strip().lower()
+
+    normalized["target"] = {
+        "type": "worker",
+        "site_id": worker.get("space_id") or measurements.get("space_id") or camera.get("space_id"),
+        "site_name": worker.get("space_name") or measurements.get("space_name") or camera.get("space_name"),
+        "worker_id": worker.get("dept_id") or last_trigger.get("worker_id"),
+        "worker_name": worker.get("name"),
+    }
+    normalized.setdefault(
+        "reason",
+        prediction.get("rest_reason_detail")
+        or prediction.get("reason")
+        or "워치/밴드 생체 데이터와 회귀 모델 결과를 기반으로 특정 작업자 조치 필요성을 판단했습니다.",
+    )
+    normalized.setdefault("rest_recommendation", prediction.get("result") or "unknown")
+    normalized.setdefault(
+        "environment_status",
+        {
+            "temperature_c": measurements.get("temp_c"),
+            "humidity_percent": measurements.get("humid"),
+            "heat_index_c": prediction.get("heat_index"),
+            "status": "unknown",
+        },
+    )
+
+    risk_factors = shared_health_risk_factor_names(health_profile)
+    normalized.setdefault(
+        "health_considerations",
+        ", ".join(risk_factors) if risk_factors else "등록된 건강 위험 요인은 없거나 확인되지 않았습니다.",
+    )
+
+    recommended_actions = normalized.get("recommended_actions")
+    if isinstance(recommended_actions, list) and recommended_actions:
+        normalized.setdefault("recommended_action", str(recommended_actions[0]))
+
+    detection_summary = yolo_context.get("detection_summary") if isinstance(yolo_context, dict) else {}
+    if detection_summary and "detection_info" not in normalized:
+        normalized["detection_info"] = {
+            "source": yolo_context.get("source"),
+            "summary": detection_summary,
+        }
+
+    normalized.setdefault("worker_location", "same_space_unknown")
+    normalized.setdefault("abnormal_behavior", "unknown")
+    return normalized
 
 
 def _as_bool(value: Any) -> bool:
@@ -728,13 +718,7 @@ def _as_bool(value: Any) -> bool:
 
 
 def _compact_camera_for_prompt(camera: dict) -> dict:
-    return {
-        "sen_id": camera.get("sen_id"),
-        "space_id": camera.get("space_id"),
-        "space_name": camera.get("space_name"),
-        "hazard_type": camera.get("hazard_type"),
-        "is_hazard": _as_bool(camera.get("is_hazard")),
-    }
+    return shared_compact_camera_for_prompt(camera)
 
 
 def _public_camera(camera: dict) -> dict:
