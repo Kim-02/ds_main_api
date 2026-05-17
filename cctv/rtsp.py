@@ -103,6 +103,7 @@ class RtspReader:
                 else:
                     cap = cv2.VideoCapture(self.rtsp_url)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                frame_interval = self._frame_interval(cap)
 
                 if not cap.isOpened():
                     self._set_opened(False)
@@ -123,6 +124,9 @@ class RtspReader:
                         break
 
                     self._set_frame(frame)
+
+                    if frame_interval > 0:
+                        time.sleep(frame_interval)
             except Exception as exc:
                 self._set_error(str(exc))
                 logger.exception("RTSP reader failed camera_id=%s", self.camera_id)
@@ -134,6 +138,21 @@ class RtspReader:
 
             if self.running:
                 time.sleep(self.reconnect_delay)
+
+    def _frame_interval(self, cap: Any) -> float:
+        """로컬 영상 파일은 FPS에 맞춰 공급해서 실제 영상처럼 재생한다."""
+        if str(self.rtsp_url).startswith("rtsp://"):
+            return 0.0
+        if not os.path.isfile(str(self.rtsp_url)):
+            return 0.0
+
+        try:
+            fps = float(cap.get(5))  # cv2.CAP_PROP_FPS
+        except Exception:
+            fps = 0.0
+        if fps <= 0:
+            fps = 30.0
+        return min(max(1.0 / fps, 0.001), 0.2)
 
 
 _readers: dict[int, RtspReader] = {}

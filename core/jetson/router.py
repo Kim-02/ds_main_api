@@ -1,3 +1,4 @@
+import logging
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Request
@@ -13,6 +14,7 @@ from .schemas import (
 )
 
 router = APIRouter(prefix="/api/jetson", tags=["jetson"])
+logger = logging.getLogger(__name__)
 
 # /api/v1/jetsons 에 마운트되는 앱 전용 라우터
 router_v1 = APIRouter(prefix="/jetsons", tags=["jetson"])
@@ -118,9 +120,9 @@ def update_jetson(jetson_id: int, req: JetsonUpdateReq, request: Request):
 def register_jetson(req: JetsonRegisterReq, request: Request):
     db = request.app.state.db
     jetson = db.register_jetson_connection(req.dept_id, req.app_id)
-    print(jetson['ip_addr'])
     if not jetson:
         raise HTTPException(status_code=404, detail="DB에 Jetson 초기 정보가 없습니다.")
+    logger.debug("Jetson app register ip_addr=%s", jetson["ip_addr"])
 
     return JetsonRegisterRes(
         jetson_id=f"jetson-{jetson['jetson_id']:02d}",
@@ -128,4 +130,3 @@ def register_jetson(req: JetsonRegisterReq, request: Request):
         api_base_url=f"http://{jetson['ip_addr']}:{jetson['port']}",
         ws_url=f"ws://{jetson['ip_addr']}:{jetson['port']}/ws/alerts",
     )
-

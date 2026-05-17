@@ -101,7 +101,7 @@ class VlmPipeline:
         next_sample_time = 0
         frame_number = 1
 
-        print(f"[VlmPipeline] 캡처 시작 source={self.config.video_source}")
+        logger.info("[VlmPipeline] 캡처 시작 source=%s", self.config.video_source)
 
         try:
             while self.running:
@@ -118,7 +118,7 @@ class VlmPipeline:
                     next_sample_time += self.config.sample_gap
         finally:
             video.release()
-            print("[VlmPipeline] 캡처 종료")
+            logger.info("[VlmPipeline] 캡처 종료")
 
     # ── YOLO ─────────────────────────────────────────────────────────────────
 
@@ -173,7 +173,7 @@ class VlmPipeline:
         if not self.abnormal_active and trigger_now:
             self.abnormal_active = True
             self.abnormal_missing_count = 0
-            print(f"[VlmPipeline] 이상상황 감지 t={round(frame_time, 2)}s")
+            logger.info("[VlmPipeline] 이상상황 감지 t=%ss", round(frame_time, 2))
 
         if not self.abnormal_active:
             return
@@ -186,7 +186,7 @@ class VlmPipeline:
         if self.abnormal_missing_count >= self.config.abnormal_missing_limit:
             self.abnormal_active = False
             self.abnormal_missing_count = 0
-            print(f"[VlmPipeline] 이상상황 종료 t={round(frame_time, 2)}s")
+            logger.info("[VlmPipeline] 이상상황 종료 t=%ss", round(frame_time, 2))
 
     # ── VLM 요청 ─────────────────────────────────────────────────────────────
 
@@ -203,7 +203,7 @@ class VlmPipeline:
 
         self._set_latest_summary(summary)
         self.validation_queue.put((request_number, summary, list(history)))
-        print(f"[VlmPipeline] VLM 분석 요청 #{request_number} t={round(frame_time, 2)}s")
+        logger.info("[VlmPipeline] VLM 분석 요청 #%s t=%ss", request_number, round(frame_time, 2))
         return True
 
     def _finish_vlm_cycle(self):
@@ -253,7 +253,7 @@ class VlmPipeline:
                 answer = analyzer.analyze(normalized_text, validation, image_path, None)
                 self._emit_result(answer)
             except Exception as error:
-                print(f"[VlmPipeline] 안전 분석 실패: {error}")
+                logger.error("[VlmPipeline] 안전 분석 실패: %s", error)
             finally:
                 self.analysis_queue.task_done()
                 self._finish_vlm_cycle()

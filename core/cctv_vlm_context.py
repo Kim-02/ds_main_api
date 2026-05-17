@@ -1,7 +1,7 @@
 """Shared YOLO-normalized context for CCTV autoregressive VLM requests."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import logging
 from pathlib import Path
@@ -34,6 +34,7 @@ class YoloNormalizedContext:
     saved_frame_count: int
     yolo_model_path: str
     generated_at: str
+    detection_summary: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
     def to_dict(self) -> dict:
@@ -50,6 +51,7 @@ class YoloNormalizedContext:
             "generated_at": self.generated_at,
             "normalized_text_length": len(self.normalized_text or ""),
             "normalized_text_preview": _limit_text(self.normalized_text or "", 300),
+            "detection_summary": self.detection_summary,
             "yolo_model_path": self.yolo_model_path,
             "error": self.error,
         }
@@ -163,6 +165,7 @@ def build_yolo_normalized_context_from_frames(
         saved_frame_count=len(saved_frame_paths),
         yolo_model_path=_model_path(),
         generated_at=datetime.now().isoformat(timespec="seconds"),
+        detection_summary=_build_detection_summary(summary),
     )
     logger.info(
         "[CCTV_YOLO_CONTEXT] END normalize camera_sen_id=%s source=%s sampled=%s image=%s text_len=%s",
@@ -192,6 +195,7 @@ def public_yolo_context(context: dict | YoloNormalizedContext | None, *, include
         "generated_at": context.get("generated_at"),
         "normalized_text_length": len(text),
         "normalized_text_preview": _limit_text(text, 300),
+        "detection_summary": context.get("detection_summary") or {},
         "yolo_model_path": context.get("yolo_model_path"),
         "error": context.get("error", ""),
     }
@@ -302,6 +306,76 @@ def _latest_image_path(summary: dict, fallback_paths: list[str]) -> str:
     if fallback_paths:
         return fallback_paths[-1]
     return ""
+
+
+def _build_detection_summary(summary: dict) -> dict[str, Any]:
+    current_state = summary.get("current_state") or {}
+    person_movement = summary.get("person_movement") or {}
+    person_tracks = summary.get("person_tracks") or []
+
+    current: dict[str, dict[str, Any]] = {}
+    for class_name in DETECT_CLASSES:
+        item = current_state.get(class_name) or {}
+        count = int(item.get("count") or 0)
+        current[class_name] = {
+            "count": count,
+            "position": item.get("position") or "none",
+            "confidence": item.get("average_confidence"),
+            "center": item.get("center") or [],
+        }
+
+    people_count = current["person"]["count"]
+    if people_count <= 0:
+        visible_people = "none"
+    elif people_count == 1:
+        visible_people = "one"
+    else:
+        visible_people = "multiple"
+
+    visible_risks = [
+        class_name
+        for class_name in ("fire", "smoke")
+        if current[class_name]["count"] > 0
+    ] or ["none"]
+
+    movement_found = person_movement.get("found") is True
+    movement = {
+        "found": movement_found,
+        "direction": person_movement.get("direction", "none" if not movement_found else "unknown"),
+        "delta": person_movement.get("delta") or [],
+        "start": person_movement.get("start") or [],
+        "end": person_movement.get("end") or [],
+    }
+    track_items = []
+    for track in person_tracks[:3]:
+        track_items.append({
+            "id": track.get("id"),
+            "direction": track.get("direction", "unknown"),
+            "visible": bool(track.get("visible_now", True)),
+            "relation": (track.get("relation") or {}).get("type", "unknown"),
+        })
+
+    text = (
+        f"person={people_count}({current['person']['position']}), "
+        f"movement={movement['direction']}, "
+        f"fire={current['fire']['count']}({current['fire']['position']}), "
+        f"smoke={current['smoke']['count']}({current['smoke']['position']})"
+    )
+
+    return {
+        "window": {
+            "start_time": summary.get("start_time"),
+            "end_time": summary.get("end_time"),
+            "frame_count": summary.get("frame_count"),
+        },
+        "visible_people": visible_people,
+        "people_count": people_count,
+        "visible_risks": visible_risks,
+        "current": current,
+        "person_movement": movement,
+        "person_tracks": track_items,
+        "text": text,
+    }
 
 
 def _model_path() -> str:

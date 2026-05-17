@@ -89,3 +89,23 @@ class FirePipelineActionResponse(BaseModel):
     status: str
     sensor_id: int
     camera_id: int
+
+
+class VideoPipelineStartReq(BaseModel):
+    """서버 실행 디렉터리의 영상 파일을 가상 CCTV로 실행한다."""
+
+    video_name: str
+    space_id: int = 1
+    camera_id: Optional[int] = None
+    restart: bool = True
+
+
+class VideoPipelineActionResponse(BaseModel):
+    status: str
+    camera_id: int
+    space_id: int
+    video_name: str
+    video_path: str
+    rtsp_reader: dict[str, Any] = Field(default_factory=dict)
+    frame_buffer: dict[str, Any] = Field(default_factory=dict)
+    fire_pipeline: dict[str, Any] = Field(default_factory=dict)

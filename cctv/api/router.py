@@ -12,6 +12,8 @@ from .schemas import (
     CameraUpdate,
     FirePipelineActionResponse,
     FirePipelineStatus,
+    VideoPipelineActionResponse,
+    VideoPipelineStartReq,
 )
 
 router = APIRouter(prefix="/cctv/cameras", tags=["cctv"])
@@ -54,6 +56,41 @@ def register_camera_from_app(
     request: Request,
 ):
     return service.register_camera_from_app(request.app.state.db, data)
+
+
+@router.post(
+    "/video/start",
+    response_model=VideoPipelineActionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="같은 디렉터리의 영상 파일을 space_id=1 가상 CCTV로 실행",
+)
+def start_video_pipeline(
+    data: VideoPipelineStartReq,
+):
+    return service.start_video_pipeline_from_file(data)
+
+
+@router.post(
+    "/video/{camera_id}/stop",
+    response_model=VideoPipelineActionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="영상 파일 가상 CCTV 파이프라인 중단",
+)
+def stop_video_pipeline(
+    camera_id: int,
+):
+    return service.stop_video_pipeline(camera_id)
+
+
+@router.get(
+    "/video/{camera_id}/status",
+    response_model=VideoPipelineActionResponse,
+    summary="영상 파일 가상 CCTV 파이프라인 상태 조회",
+)
+def get_video_pipeline_status(
+    camera_id: int,
+):
+    return service.get_video_pipeline_status(camera_id)
 
 
 @router.get(

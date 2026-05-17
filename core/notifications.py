@@ -25,6 +25,15 @@ def make_hazard_alert_ws_payload(
     duration_ms: int = 3000,
     reset_after_ms: int = 5000,
     event_time: str | None = None,
+    vlm_result: Any | None = None,
+    hazard_material: str = "",
+    hazard_warning: str = "",
+    hazard_specific_action: str = "",
+    evacuation_route: str = "",
+    abnormal_behavior: str = "",
+    detection_info: dict | None = None,
+    person_movement: dict | None = None,
+    environment_detections: dict | None = None,
 ) -> dict:
     """앱의 HazardAlert 모델과 1:1 매핑되는 WebSocket 알림 payload를 반환한다."""
     color_map = {"danger": "red", "warning": "orange", "info": "yellow"}
@@ -54,6 +63,15 @@ def make_hazard_alert_ws_payload(
         "duration_ms": duration_ms,
         "reset_after_ms": reset_after_ms,
         "is_read": False,
+        "vlm_result": vlm_result,
+        "hazard_material": hazard_material,
+        "hazard_warning": hazard_warning,
+        "hazard_specific_action": hazard_specific_action,
+        "evacuation_route": evacuation_route,
+        "abnormal_behavior": abnormal_behavior,
+        "detection_info": detection_info or {},
+        "person_movement": person_movement or {},
+        "environment_detections": environment_detections or {},
     }
 
 
@@ -86,7 +104,19 @@ def extract_vlm_text(result: Any) -> str:
 
     if isinstance(result, dict):
         parts = []
-        for key in ("summary", "recommended_action", "situation", "evidence", "raw_text", "text"):
+        for key in (
+            "summary",
+            "hazard_warning",
+            "hazard_specific_action",
+            "evacuation_route",
+            "abnormal_behavior",
+            "detection_text",
+            "recommended_action",
+            "situation",
+            "evidence",
+            "raw_text",
+            "text",
+        ):
             value = result.get(key)
             if value:
                 parts.append(str(value).strip())

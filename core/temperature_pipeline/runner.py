@@ -27,6 +27,24 @@ DEFAULT_SESSION_SECONDS = 120
 DEFAULT_ANALYSIS_INTERVAL_SECONDS = 30
 DEFAULT_STALE_SECONDS = 60
 
+HAZARD_RESPONSE_GUIDES = {
+    "벤젠": (
+        "벤젠: 점화원 차단, 흡입·접촉 회피, 안전 시 환기, 상풍측 대피와 전문 대응 요청."
+    ),
+    "benzene": (
+        "벤젠: 점화원 차단, 흡입·접촉 회피, 안전 시 환기, 상풍측 대피와 전문 대응 요청."
+    ),
+    "나트륨": (
+        "나트륨: 물·습기 접촉 금지, 건조 격리, 물소화 금지, 금속화재 대응 인력 호출."
+    ),
+    "sodium": (
+        "나트륨: 물·습기 접촉 금지, 건조 격리, 물소화 금지, 금속화재 대응 인력 호출."
+    ),
+    "철강": (
+        "철강: 고온 표면·중량물·흄 주의, 작업자 이격, 보호구와 환기 상태 확인."
+    ),
+}
+
 
 class TemperatureCameraVlmManager:
     """온도 이상 이벤트 기준으로 같은 공간 카메라 autoregressive VLM 세션을 관리한다."""
@@ -67,7 +85,8 @@ class TemperatureCameraVlmManager:
             logger.warning("[TemperatureVLM] temperature sensor has no space_id sensor_id=%s", sensor_id)
             return {"started": 0, "extended": 0, "space_id": None, "cameras": []}
 
-        cameras = self._db_handler.get_cameras_by_space_id(int(space_id))
+        cameras = list(self._db_handler.get_cameras_by_space_id(int(space_id)))
+        cameras.extend(_get_video_runtime_cameras_by_space_id(int(space_id)))
         started = 0
         extended = 0
         camera_statuses = []
@@ -160,33 +179,35 @@ class TemperatureCameraVlmManager:
         camera = payload.get("camera") or {}
         result = payload.get("result") or {}
         status = payload.get("status") or {}
+        yolo_context = payload.get("yolo_context") or {}
         last_trigger = status.get("last_trigger") or {}
+        if isinstance(result, dict):
+            result = _normalize_temperature_vlm_result(result, camera, last_trigger, yolo_context)
+            payload["result"] = result
+            logger.info(
+                "[VLM TEXT] event_type=temperature_camera_vlm_enriched camera_sen_id=%s text=%s",
+                camera.get("sen_id"),
+                _json_dumps(result),
+            )
 
         # VLM 결과에서 핵심 정보 추출
         message_text = extract_vlm_text(result) or payload.get("text") or "온습도 이상 감지 - VLM 분석 완료"
         risk_level = result.get("risk_level") if isinstance(result, dict) else None
-        hazard_warning = str(result.get("hazard_warning") or "").lower()
+        hazard_warning = result.get("hazard_warning") if isinstance(result, dict) else None
 
         # level 결정: danger / warning / info
-        if risk_level == "high" or hazard_warning in {"yes", "true", "1"}:
+        if risk_level == "high":
             level = "danger"
             title = "온습도 위험 감지"
-        elif risk_level == "medium":
+        elif risk_level == "medium" or _has_meaningful_text(hazard_warning):
             level = "warning"
             title = "온습도 주의 감지"
         else:
             level = "info"
             title = "온습도 VLM 분석 완료"
 
-        # summary + recommended_action 조합으로 최종 메시지 구성
-        summary = result.get("summary") if isinstance(result, dict) else None
-        recommended = result.get("recommended_action") if isinstance(result, dict) else None
-        if summary and recommended:
-            message_text = f"{summary} {recommended}"
-        elif summary:
-            message_text = summary
-        elif recommended:
-            message_text = recommended
+        if isinstance(result, dict):
+            message_text = _compose_temperature_alert_message(result)
 
         camera_sen_id_raw = camera.get("sen_id")
         camera_sen_id = int(camera_sen_id_raw) if camera_sen_id_raw is not None else None
@@ -222,6 +243,15 @@ class TemperatureCameraVlmManager:
             camera_loc=camera.get("space_name") or "",
             source="temperature_vlm",
             vibration=vibration,
+            vlm_result=result,
+            hazard_material=result.get("hazard_material") if isinstance(result, dict) else "",
+            hazard_warning=result.get("hazard_warning") if isinstance(result, dict) else "",
+            hazard_specific_action=result.get("hazard_specific_action") if isinstance(result, dict) else "",
+            evacuation_route=result.get("evacuation_route") if isinstance(result, dict) else "",
+            abnormal_behavior=result.get("abnormal_behavior") if isinstance(result, dict) else "",
+            detection_info=_as_dict(result.get("detection_info")) if isinstance(result, dict) else {},
+            person_movement=_as_dict(result.get("person_movement")) if isinstance(result, dict) else {},
+            environment_detections=_as_dict(result.get("environment_detections")) if isinstance(result, dict) else {},
         )
         asyncio.run_coroutine_threadsafe(self._broadcast_fn(ws_payload), self._loop)
         logger.info(
@@ -547,7 +577,8 @@ def run_temperature_camera_vlm_once(
             "cameras": [],
         }
 
-    cameras = db_handler.get_cameras_by_space_id(int(space_id))
+    cameras = list(db_handler.get_cameras_by_space_id(int(space_id)))
+    cameras.extend(_get_video_runtime_cameras_by_space_id(int(space_id)))
     if camera_sen_id is not None:
         cameras = [camera for camera in cameras if int(camera.get("sen_id") or -1) == int(camera_sen_id)]
 
@@ -612,22 +643,32 @@ def run_temperature_camera_vlm_once(
 def _build_temperature_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
     hazard_context = _build_hazard_context(camera, trigger)
     trigger_json = _limit_text(_json_dumps(trigger), 260)
-    hazard_json = _limit_text(_json_dumps(hazard_context), 180)
+    hazard_json = _limit_text(_json_dumps(hazard_context), 320)
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
-        + "목적: 고온 감지 공간의 작업자 이동/행동/위험을 관리자에게 짧게 알립니다.\n"
-        "유의관리지역이면 hazard_type 위험물을 명시하고 안전한 대피 경로를 경고하세요. 불확실하면 unknown.\n"
-        "JSON 하나만 답하세요:\n"
+        + "목적: 고온 감지 작업장의 현재 상황, 작업자 이상행동, 위험물별 대처를 관리자에게 전달합니다.\n"
+        "중요: 온도 값은 작업자 체온이 아니라 작업장 환경 온도입니다. '직원 온도가 높다'라고 쓰지 마세요.\n"
+        "hazard_type은 DB에 등록된 유의물질입니다. 화면에 보이지 않으면 '분포/누출'이라고 단정하지 마세요.\n"
+        "현재 이미지와 YOLO정규화텍스트에 보이는 것만 시각 위험으로 확정하세요. 화재/연기/열원은 보일 때만 visible_risks에 넣으세요.\n"
+        "온도센서 고온만으로 heat_source를 만들지 말고 temperature_status/high로 표현하세요.\n"
+        "유의관리지역이면 hazard_material과 hazard_warning, hazard_specific_action에 hazard_type별 대처를 짧게 포함하세요.\n"
+        "비틀거림, 중심 잃음, 쓰러짐, 혼란 행동이 보이면 abnormal_behavior에 명시하세요. 불확실하면 unknown 또는 none.\n"
+        "각 문자열은 60자 이내로 짧게 쓰세요. JSON 하나만 답하세요. 코드블록 금지:\n"
         "{"
         "\"summary\":\"한 문장\","
         "\"risk_level\":\"low|medium|high|unknown\","
+        "\"temperature_status\":\"normal|high|unknown\","
         "\"visible_people\":\"none|one|multiple|unknown\","
-        "\"person_actions\":[\"working\",\"moving\",\"leaving\",\"fallen\",\"helping\",\"unknown\"],"
-        "\"movement\":\"none|toward_risk|away_from_risk|random|unknown\","
-        "\"visible_risks\":[\"fire\",\"smoke\",\"heat_source\",\"steam\",\"crowding\",\"none\"],"
+        "\"person_actions\":[\"working\",\"moving\",\"leaving\",\"staggering\",\"unstable_posture\",\"fallen\",\"helping\",\"unknown\"],"
+        "\"abnormal_behavior\":\"none|staggering|unstable_posture|fallen|confused|unknown\","
+        "\"person_movement\":\"none|left|right|up|down|stable|unknown\","
+        "\"visible_risks\":[\"fire\",\"smoke\",\"steam\",\"spill\",\"crowding\",\"unsafe_posture\",\"none\"],"
+        "\"environment_detections\":\"person=n,fire=n,smoke=n\","
+        "\"hazard_material\":\"위험물명 또는 none\","
         "\"evacuation_route\":\"대피 경로 또는 unknown\","
-        "\"hazard_warning\":\"위험물 경고 또는 none\","
-        "\"recommended_action\":\"조치 한 문장\""
+        "\"hazard_warning\":\"위험물별 경고 또는 none\","
+        "\"hazard_specific_action\":\"위험물별 대처 한 문장\","
+        "\"recommended_action\":\"관리자/작업자 조치 한 문장\""
         "}\n"
         f"유의관리지역={hazard_json}\n"
         f"온도이벤트={trigger_json}"
@@ -687,10 +728,188 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _get_video_runtime_cameras_by_space_id(space_id: int) -> list[dict]:
+    try:
+        from cctv.api.service import get_video_runtime_cameras_by_space_id
+        return get_video_runtime_cameras_by_space_id(space_id)
+    except Exception:
+        return []
+
+
+def _normalize_temperature_vlm_result(
+    result: dict,
+    camera: dict,
+    last_trigger: dict,
+    yolo_context: dict | None = None,
+) -> dict:
+    normalized = dict(result)
+    hazard_context = _build_hazard_context(camera, last_trigger)
+    hazard_type = str(hazard_context.get("hazard_type") or "").strip()
+    is_hazard = _as_bool(hazard_context.get("is_hazard"))
+    sample = hazard_context.get("sample") if isinstance(hazard_context.get("sample"), dict) else {}
+    temp = sample.get("temp")
+    space_name = hazard_context.get("space_name") or camera.get("space_name") or "작업장"
+    guide = _hazard_response_guide(hazard_type)
+    detection_info = _build_detection_info_from_yolo(yolo_context or {})
+
+    if temp is not None:
+        normalized.setdefault("temperature_status", "high")
+
+    summary = str(normalized.get("summary") or "").strip()
+    if (
+        _summary_confuses_worker_temperature(summary)
+        or _summary_confuses_hazard_distribution(summary, hazard_type)
+    ):
+        normalized["summary"] = _temperature_summary(space_name, temp, hazard_type if is_hazard else "")
+    elif not summary:
+        normalized["summary"] = _temperature_summary(space_name, temp, hazard_type if is_hazard else "")
+
+    if detection_info:
+        normalized["detection_info"] = detection_info
+        normalized["detection_text"] = detection_info.get("text", "")
+        normalized["environment_detections"] = detection_info.get("environment_detections", {})
+        normalized["person_movement"] = detection_info.get("person_movement", {})
+        if detection_info.get("visible_people"):
+            normalized["visible_people"] = detection_info.get("visible_people")
+
+    visible_risks = normalized.get("visible_risks")
+    if isinstance(visible_risks, list):
+        cleaned = [
+            str(item)
+            for item in visible_risks
+            if str(item).strip().lower() not in {"heat_source", "temperature", "high_temperature"}
+        ]
+        normalized["visible_risks"] = cleaned or ["none"]
+    if detection_info:
+        yolo_risks = detection_info.get("visible_risks") or []
+        if yolo_risks and yolo_risks != ["none"]:
+            existing = normalized.get("visible_risks")
+            existing_list = existing if isinstance(existing, list) else []
+            merged = []
+            for item in existing_list + yolo_risks:
+                if item and item != "none" and item not in merged:
+                    merged.append(item)
+            normalized["visible_risks"] = merged or ["none"]
+
+    if is_hazard and hazard_type and hazard_type not in {"none", "unknown"}:
+        normalized["hazard_material"] = hazard_type
+        if not _has_meaningful_text(normalized.get("hazard_warning")):
+            normalized["hazard_warning"] = f"{hazard_type} 유의관리지역입니다. {guide}"
+        elif hazard_type not in str(normalized.get("hazard_warning")):
+            normalized["hazard_warning"] = f"{hazard_type}: {normalized.get('hazard_warning')}"
+
+        if not _has_meaningful_text(normalized.get("hazard_specific_action")):
+            normalized["hazard_specific_action"] = guide
+        elif hazard_type not in str(normalized.get("hazard_specific_action")):
+            normalized["hazard_specific_action"] = f"{hazard_type}: {normalized.get('hazard_specific_action')}"
+
+        if normalized.get("risk_level") in {None, "", "low", "unknown"} and temp is not None:
+            normalized["risk_level"] = "medium"
+    else:
+        normalized.setdefault("hazard_material", "none")
+
+    normalized.setdefault("abnormal_behavior", "unknown")
+    normalized.setdefault("evacuation_route", "unknown")
+    return normalized
+
+
+def _compose_temperature_alert_message(result: dict) -> str:
+    parts = []
+    summary = str(result.get("summary") or "").strip()
+    detection_text = str(result.get("detection_text") or "").strip()
+    hazard_warning = str(result.get("hazard_warning") or "").strip()
+    hazard_action = str(result.get("hazard_specific_action") or "").strip()
+    abnormal = str(result.get("abnormal_behavior") or "").strip()
+    evacuation = str(result.get("evacuation_route") or "").strip()
+    recommended = str(result.get("recommended_action") or "").strip()
+
+    if summary:
+        parts.append(summary)
+    if detection_text:
+        parts.append(f"탐지: {detection_text}")
+    if _has_meaningful_text(abnormal) and abnormal not in {"none", "unknown"}:
+        parts.append(f"작업자 이상행동: {abnormal}")
+    if _has_meaningful_text(hazard_warning):
+        parts.append(f"위험물 경고: {hazard_warning}")
+    if _has_meaningful_text(hazard_action):
+        parts.append(f"위험물 대처: {hazard_action}")
+    if _has_meaningful_text(evacuation):
+        parts.append(f"대피: {evacuation}")
+    if _has_meaningful_text(recommended):
+        parts.append(f"조치: {recommended}")
+
+    return _limit_text(" ".join(parts), 650) if parts else "온습도 이상 감지 - VLM 분석 완료"
+
+
+def _build_detection_info_from_yolo(yolo_context: dict) -> dict:
+    summary = yolo_context.get("detection_summary") if isinstance(yolo_context, dict) else {}
+    if not isinstance(summary, dict) or not summary:
+        return {}
+
+    current = summary.get("current") if isinstance(summary.get("current"), dict) else {}
+    person_count = _current_count(current, "person")
+    fire_count = _current_count(current, "fire")
+    smoke_count = _current_count(current, "smoke")
+    movement = summary.get("person_movement") if isinstance(summary.get("person_movement"), dict) else {}
+    direction = str(movement.get("direction") or ("none" if person_count <= 0 else "unknown"))
+    visible_risks = []
+    if fire_count > 0:
+        visible_risks.append("fire")
+    if smoke_count > 0:
+        visible_risks.append("smoke")
+    if not visible_risks:
+        visible_risks = ["none"]
+
+    environment_detections = {
+        "person": person_count,
+        "fire": fire_count,
+        "smoke": smoke_count,
+    }
+    text = f"person={person_count}, movement={direction}, fire={fire_count}, smoke={smoke_count}"
+
+    return {
+        "source": yolo_context.get("source"),
+        "frame_count": yolo_context.get("frame_count"),
+        "sampled_count": yolo_context.get("sampled_count"),
+        "visible_people": summary.get("visible_people") or _visible_people_from_count(person_count),
+        "visible_risks": visible_risks,
+        "environment_detections": environment_detections,
+        "person_movement": {
+            "found": bool(movement.get("found")),
+            "direction": direction,
+            "delta": movement.get("delta") or [],
+            "start": movement.get("start") or [],
+            "end": movement.get("end") or [],
+        },
+        "current": current,
+        "text": text,
+    }
+
+
+def _current_count(current: dict, class_name: str) -> int:
+    item = current.get(class_name) if isinstance(current, dict) else {}
+    if not isinstance(item, dict):
+        return 0
+    try:
+        return int(item.get("count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _visible_people_from_count(count: int) -> str:
+    if count <= 0:
+        return "none"
+    if count == 1:
+        return "one"
+    return "multiple"
+
+
 def _build_hazard_context(camera: dict, trigger: dict) -> dict:
     prediction = trigger.get("prediction") if isinstance(trigger, dict) else {}
     if not isinstance(prediction, dict):
         prediction = {}
+    if not prediction and isinstance(trigger, dict):
+        prediction = trigger
 
     is_hazard = _as_bool(
         prediction.get("is_hazard")
@@ -706,12 +925,55 @@ def _build_hazard_context(camera: dict, trigger: dict) -> dict:
         "space_name": prediction.get("space_name") or camera.get("space_name"),
         "is_hazard": is_hazard,
         "hazard_type": hazard_type,
+        "sample": prediction.get("sample") or {},
+        "response_guide": _hazard_response_guide(hazard_type) if is_hazard else "",
         "instruction": (
             "hazard_type 유의물을 피하는 대피 경로와 경고를 포함"
             if is_hazard
             else "등록된 유의물 없음"
         ),
     }
+
+
+def _hazard_response_guide(hazard_type: str) -> str:
+    normalized = str(hazard_type or "").strip()
+    if not normalized or normalized in {"none", "unknown"}:
+        return "등록 위험물 정보가 없으므로 현장 안전관리자 지시에 따라 접근을 제한하고 작업자를 안전 구역으로 이동시킨다."
+
+    lower = normalized.lower()
+    for key, guide in HAZARD_RESPONSE_GUIDES.items():
+        if key.lower() in lower or lower in key.lower():
+            return guide
+
+    return (
+        f"{normalized}: 등록된 유의물질입니다. 직접 접촉·흡입·가열을 피하고, "
+        "작업자를 위험물 반대 방향의 안전 구역으로 이동시키며 현장 안전관리자와 전문 대응팀에 즉시 알린다."
+    )
+
+
+def _has_meaningful_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text not in {"", "none", "unknown", "null", "false", "0", "no", "없음"}
+
+
+def _summary_confuses_worker_temperature(summary: str) -> bool:
+    text = str(summary or "")
+    return ("직원" in text or "작업자" in text or "근로자" in text) and "온도" in text and "작업장" not in text
+
+
+def _summary_confuses_hazard_distribution(summary: str, hazard_type: str) -> bool:
+    text = str(summary or "")
+    hazard = str(hazard_type or "")
+    if not hazard or hazard in {"none", "unknown"} or hazard not in text:
+        return False
+    return any(word in text for word in ("분포", "퍼져", "누출", "새고", "확산"))
+
+
+def _temperature_summary(space_name: str, temp: Any, hazard_type: str) -> str:
+    temp_text = f"{temp}도" if temp is not None else "기준 이상"
+    if hazard_type:
+        return f"{space_name}에서 온습도 센서가 {temp_text} 고온을 감지했고, 등록 위험물 {hazard_type}에 대한 주의가 필요합니다."
+    return f"{space_name}에서 온습도 센서가 {temp_text} 고온을 감지했습니다."
 
 
 def _as_bool(value: Any) -> bool:
@@ -722,6 +984,10 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return False
+
+
+def _as_dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
 def _limit_text(text: str, max_chars: int) -> str:
