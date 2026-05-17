@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import socket
 from contextlib import asynccontextmanager
 from typing import List
@@ -12,7 +12,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
-
 
 # ── WebSocket 연결 관리 ──────────────────────────────────────────────────────
 
@@ -180,6 +179,8 @@ async def lifespan(app: FastAPI):
         db_handler=db,
         broker_host=settings.mqtt_broker_host,
         broker_port=settings.mqtt_broker_port,
+        on_th_data=app.state.transmission.send_th_data,
+        on_hb_data=app.state.transmission.send_vital_data,
     )
 
     mqtt_sensor_svc.start()
@@ -477,6 +478,7 @@ from core.map.router import router as map_router
 from core.watch_pipeline.router import router as watch_vlm_router
 from core.temperature_pipeline.router import router as temperature_vlm_router
 from core.report.router import events_router, internal_router, reports_router
+from live.router import router as live_router
 
 app.include_router(jetson_router)
 app.include_router(sensor_registry_router)
@@ -488,9 +490,7 @@ app.include_router(temp_web_router)
 app.include_router(internal_router)
 app.include_router(events_router)
 app.include_router(reports_router)
-
-
-# ── WebSocket ─────────────────────────────────────────────────────────────────
+app.include_router(live_router)
 
 @app.websocket("/ws/alerts")
 async def ws_alerts(websocket: WebSocket):
@@ -605,3 +605,4 @@ if __name__ == "__main__":
         port=settings.api_port,
         reload=settings.debug,
     )
+

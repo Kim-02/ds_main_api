@@ -2367,17 +2367,23 @@ class DatabaseHandler:
                     cursor.execute(
                         """
                         SELECT
-                            t.sen_id,
+                            s.sen_id,
                             s.sensor_id,
                             s.sen_name,
+                            s.is_online,
                             t.time,
                             t.temp,
                             t.humid
-                        FROM th_trans t
-                        JOIN sensor s
+                        FROM sensor s
+                        LEFT JOIN th_trans t
                           ON t.sen_id = s.sen_id
-                        ORDER BY t.time DESC
-                        LIMIT 1
+                         AND t.time = (
+                            SELECT MAX(t2.time)
+                            FROM th_trans t2
+                            WHERE t2.sen_id = s.sen_id
+                         )
+                        WHERE s.sensor_type IN ('temp_humidity', 'temperature_humidity', 'temperature', 'th')
+                        ORDER BY s.sensor_id
                         """
                     )
                     return cursor.fetchall()
@@ -2393,20 +2399,26 @@ class DatabaseHandler:
                     cursor.execute(
                         """
                         SELECT
-                            h.sen_id,
+                            s.sen_id,
                             s.sensor_id,
                             s.sen_name,
+                            s.is_online,
                             w.dept_id,
                             w.name AS worker_name,
                             h.time,
                             h.hr
-                        FROM hb_trans h
-                        JOIN sensor s
+                        FROM sensor s
+                        LEFT JOIN hb_trans h
                           ON h.sen_id = s.sen_id
+                         AND h.time = (
+                            SELECT MAX(h2.time)
+                            FROM hb_trans h2
+                            WHERE h2.sen_id = s.sen_id
+                         )
                         LEFT JOIN worker w
                           ON w.sen_id = s.sen_id
-                        ORDER BY h.time DESC
-                        LIMIT 1
+                        WHERE s.sensor_type IN ('heart_band', 'heartbeat', 'heart_rate', 'hb', 'watch')
+                        ORDER BY s.sensor_id
                         """
                     )
                     return cursor.fetchall()

@@ -14,7 +14,7 @@ import json
 import logging
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -25,10 +25,19 @@ _HB_TYPES = {"heart_band", "heartbeat", "heart_rate", "hb", "watch"}
 
 
 class MqttSensorService:
-    def __init__(self, db_handler, broker_host: str = "127.0.0.1", broker_port: int = 1883):
+    def __init__(
+        self,
+        db_handler,
+        broker_host: str = "127.0.0.1",
+        broker_port: int = 1883,
+        on_th_data: Optional[Callable[[dict], None]] = None,
+        on_hb_data: Optional[Callable[[dict], None]] = None,
+    ):
         self.db_handler = db_handler
         self.broker_host = broker_host
         self.broker_port = broker_port
+        self.on_th_data = on_th_data
+        self.on_hb_data = on_hb_data
 
         self.client = mqtt.Client()
         self.client.on_connect = self._on_connect
@@ -154,6 +163,7 @@ class MqttSensorService:
         ok = self.db_handler.insert_th_trans(sen_id, ts, temp, humid)
         if ok:
             logger.info("[MQTT Sensor] 온습도 업데이트 sensor_id=%s temp=%s humid=%s", sensor_id, temp, humid)
+            self._emit_th(sensor_id, temp, humid, ts)
 
     def _save_hb(self, topic: str, sensor_id: str, sen_id: int, ts, payload: dict) -> None:
         hr = payload.get("hr") if payload.get("hr") is not None else payload.get("heart_rate")
@@ -168,6 +178,7 @@ class MqttSensorService:
         ok = self.db_handler.insert_hb_trans(sen_id, ts, hr)
         if ok:
             logger.info("[MQTT Sensor] 심박 업데이트 sensor_id=%s hr=%s", sensor_id, hr)
+            self._emit_hb(sensor_id, hr, ts)
 
     def _store_th_by_sensor_id(self, topic: str, sensor_id: str, payload: dict) -> None:
         temp = payload.get("temp") if payload.get("temp") is not None else payload.get("temperature")
@@ -177,6 +188,7 @@ class MqttSensorService:
                 sensor_id=sensor_id, temperature=temp, humidity=humid, ts=datetime.now()
             )
             logger.info("[MQTT Sensor] 온습도 업데이트 sensor_id=%s temp=%s humid=%s", sensor_id, temp, humid)
+            self._emit_th(sensor_id, temp, humid, datetime.now())
         except Exception as e:
             logger.error("[MQTT Sensor] 온습도 저장 실패 sensor_id=%s: %s", sensor_id, e)
 
@@ -195,8 +207,36 @@ class MqttSensorService:
                 sensor_id=sensor_id, hr=hr, ts=datetime.now()
             )
             logger.info("[MQTT Sensor] 심박 업데이트 sensor_id=%s hr=%s", sensor_id, hr)
+            self._emit_hb(sensor_id, hr, datetime.now())
         except Exception as e:
             logger.error("[MQTT Sensor] 심박 저장 실패 sensor_id=%s: %s", sensor_id, e)
+
+    def _emit_th(self, sensor_id: str, temp, humid, ts) -> None:
+        if self.on_th_data is None:
+            return
+        try:
+            self.on_th_data({
+                "type": "th",
+                "sensor_id": sensor_id,
+                "temp": temp,
+                "humid": humid,
+                "time": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            })
+        except Exception as e:
+            logger.warning("[MQTT Sensor] 온습도 웹소켓 전송 실패 sensor_id=%s: %s", sensor_id, e)
+
+    def _emit_hb(self, sensor_id: str, hr, ts) -> None:
+        if self.on_hb_data is None:
+            return
+        try:
+            self.on_hb_data({
+                "type": "watch",
+                "sensor_id": sensor_id,
+                "hr": hr,
+                "time": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            })
+        except Exception as e:
+            logger.warning("[MQTT Sensor] 심박 웹소켓 전송 실패 sensor_id=%s: %s", sensor_id, e)
 
     @staticmethod
     def _extract_sensor_id_from_topic(topic: str) -> Optional[str]:
