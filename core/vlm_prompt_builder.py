@@ -53,11 +53,11 @@ def build_environment_health_prompt(camera: dict, trigger: dict, yolo_context: d
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "판단유형=environment\n"
-        "관점: 현장 단위 환경 위험도 판단입니다. 특정 작업자에게 문제가 발생했다고 단정하지 마세요.\n"
-        "개인 건강 데이터는 현장에 건강상 주의가 필요한 작업자가 포함되어 있는지 보는 보조 정보입니다.\n"
-        "온도/습도/열지수, 건강 취약 작업자 존재, 화면상 행동, 현장 위험, 관리자 조치, 작업자 안내를 설명하세요.\n"
+        "관점: 현장 단위 건강 주의 판단입니다. 특정 작업자에게 문제가 발생했다고 단정하지 마세요.\n"
+        "이 판단에서는 작업장 온도/습도/열지수 등 환경 데이터는 사용하지 마세요.\n"
+        "개인 건강 데이터와 건강 취약 작업자 존재 여부, 화면상 행동, 현장 위험, 관리자 조치, 작업자 안내만 설명하세요.\n"
         "건강 취약 작업자가 있더라도 화면상 이상행동이 명확하지 않으면 확인 필요로 표현하세요.\n"
-        f"현장환경이벤트={json_dumps(context)}\n"
+        f"현장건강이벤트={json_dumps(context)}\n"
         "코드블록 없이 JSON 하나만 출력하세요.\n"
         f"응답형식={_common_response_schema(target_type='site')}"
     )
@@ -68,7 +68,8 @@ def build_worker_regression_prompt(camera: dict, trigger: dict, yolo_context: di
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
         + "판단유형=worker_regression\n"
-        "관점: 특정 작업자 위험도. 심박/기준심박/건강요인/온습도/열지수/화면 행동을 함께 보세요.\n"
+        "관점: 특정 작업자 건강 위험도 판단입니다. 심박/기준심박/건강요인/체온 등 개인 건강 데이터만 보세요.\n"
+        "작업장 온도/습도/열지수 등 환경 데이터는 이 판단에 사용하지 마세요.\n"
         "작업자를 화면에서 특정 못하면 worker_location=same_space_unknown, 화면상 증상은 단정 금지.\n"
         "회귀 결과가 약한휴식권고이면 risk_level은 최소 medium, 강한휴식권고는 high, 반드시 휴식은 critical로 보세요.\n"
         "휴식권고가 있으면 CCTV에 사람이 안 보여도 no_action을 쓰지 말고 작업자 휴식/관리자 확인 조치를 recommended_actions에 넣으세요.\n"
@@ -97,21 +98,19 @@ def build_retry_prompt(camera: dict, trigger: dict, yolo_context: dict, *, mode:
 
 def compact_environment_trigger_for_prompt(camera: dict, trigger: dict) -> dict:
     prediction = _prediction_or_trigger(trigger)
-    sample = prediction.get("sample") if isinstance(prediction.get("sample"), dict) else {}
     health_attention = (
         prediction.get("health_attention")
         if isinstance(prediction.get("health_attention"), dict)
         else {}
     )
+
     hazard_type = str(prediction.get("hazard_type") or camera.get("hazard_type") or "").strip()
     is_hazard = as_bool(
         prediction.get("is_hazard")
         if prediction.get("is_hazard") is not None
         else camera.get("is_hazard")
     )
-    heat_index = prediction.get("heat_index")
-    if heat_index is None:
-        heat_index = calc_heat_index_c(sample.get("temp"), sample.get("humid"))
+
     return {
         "target": {
             "type": "site",
@@ -119,14 +118,6 @@ def compact_environment_trigger_for_prompt(camera: dict, trigger: dict) -> dict:
             "site_name": prediction.get("space_name") or camera.get("space_name"),
             "worker_id": None,
             "worker_name": None,
-        },
-        "environment": {
-            "temperature_c": sample.get("temp"),
-            "humidity_percent": sample.get("humid"),
-            "heat_index_c": heat_index,
-            "temperature_sensor_id": prediction.get("temperature_sensor_id"),
-            "temperature_sensor_name": prediction.get("temperature_sensor_name"),
-            "threshold_c": prediction.get("threshold_c"),
         },
         "health_attention": {
             "attention_worker_count": health_attention.get("attention_worker_count", 0),
@@ -149,6 +140,7 @@ def compact_worker_regression_trigger_for_prompt(trigger: dict) -> dict:
     worker = prediction.get("worker") if isinstance(prediction.get("worker"), dict) else {}
     measurements = prediction.get("measurements") if isinstance(prediction.get("measurements"), dict) else {}
     health_profile = prediction.get("health_profile") if isinstance(prediction.get("health_profile"), dict) else {}
+
     return {
         "target": {
             "type": "worker",
@@ -170,13 +162,6 @@ def compact_worker_regression_trigger_for_prompt(trigger: dict) -> dict:
             "baseline_hr": measurements.get("baseline_hr") or prediction.get("baseline_hr"),
             "hr_delta_from_baseline": prediction.get("hr_delta_from_baseline"),
             "body_temperature_c": measurements.get("body_temperature_c"),
-        },
-        "environment": {
-            "temperature_c": measurements.get("temp_c"),
-            "humidity_percent": measurements.get("humid"),
-            "heat_index_c": prediction.get("heat_index"),
-            "temperature_sensor_id": measurements.get("temperature_sensor_id"),
-            "temperature_sensor_name": measurements.get("temperature_sensor_name"),
         },
         "health_profile": {
             "age": health_profile.get("age"),
