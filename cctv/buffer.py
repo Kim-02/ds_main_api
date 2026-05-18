@@ -212,6 +212,12 @@ def get_buffer_status(camera_id: int) -> dict:
     return buffer.status()
 
 
+def get_all_buffer_ids() -> list[int]:
+    """진단용: 현재 등록된 frame buffer의 camera_id 목록을 반환."""
+    with _buffers_lock:
+        return list(_buffers.keys())
+
+
 def stop_all_buffers() -> None:
     with _buffers_lock:
         camera_ids = list(_buffers.keys())
