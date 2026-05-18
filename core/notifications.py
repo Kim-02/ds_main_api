@@ -173,7 +173,20 @@ def _extract_site_vlm_text(result: dict) -> str:
         parts.append(f"건강 위험: {health_risk_summary}")
     if isinstance(recommended_actions, list):
         for action in recommended_actions[:2]:
-            if action and str(action).strip():
-                parts.append(f"조치: {action}")
+            text = _action_text(action)
+            if text:
+                parts.append(f"조치: {text}")
 
     return " | ".join(parts) if parts else ""
+
+
+def _action_text(action: Any) -> str:
+    if isinstance(action, str):
+        return action.strip()
+    if isinstance(action, dict):
+        for key in ("action", "description", "text", "content", "message"):
+            val = action.get(key)
+            if val and isinstance(val, str):
+                return val.strip()
+        return " ".join(str(v) for v in action.values() if v).strip()
+    return str(action).strip() if action else ""

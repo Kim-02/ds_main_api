@@ -848,6 +848,7 @@ def _normalize_temperature_vlm_result(
     actions = normalized.get("recommended_actions")
     if not isinstance(actions, list):
         actions = []
+    actions = [_flatten_action_item(a) for a in actions if a]
 
     # VLM 조치가 비어 있거나 건강 요약을 그대로 반복하면 DB 기반으로 보강
     risk_factors = health_attention.get("risk_factors") or {}
@@ -902,8 +903,9 @@ def _compose_temperature_alert_message(result: dict) -> str:
         parts.append(f"건강 위험: {health_risk_summary}")
     if isinstance(recommended_actions, list):
         for action in recommended_actions[:2]:
-            if _has_meaningful_text(str(action)):
-                parts.append(f"조치: {action}")
+            text = _flatten_action_item(action)
+            if _has_meaningful_text(text):
+                parts.append(f"조치: {text}")
 
     return _limit_text(" | ".join(parts), 650) if parts else "온습도 이상 감지 - VLM 분석 완료"
 
@@ -1002,6 +1004,19 @@ def _build_hazard_context(camera: dict, trigger: dict) -> dict:
             else "등록된 유의물 없음"
         ),
     }
+
+
+def _flatten_action_item(item: Any) -> str:
+    """VLM이 action을 dict로 반환할 때 텍스트만 추출한다."""
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for key in ("action", "description", "text", "content", "message"):
+            val = item.get(key)
+            if val and isinstance(val, str):
+                return val.strip()
+        return " ".join(str(v) for v in item.values() if v).strip()
+    return str(item).strip()
 
 
 def _build_actions_from_risk_factors(risk_factors: dict, health_attention: dict) -> list[str]:
