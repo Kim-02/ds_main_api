@@ -74,7 +74,7 @@ class DatabaseHandlerRestDataRepository:
             space_id=_optional_int(row, "space_id"),
             space_name=str(row.get("space_name") or ""),
         )
-        logger.info(
+        logger.debug(
             "[RestRepository] environment worker_id=%s sensor_id=%s space_id=%s temp=%s humid=%s",
             worker_id,
             sample.sensor_id,
@@ -112,7 +112,7 @@ class DatabaseHandlerRestDataRepository:
             sensor_id=str(row.get("sensor_id") or ""),
             sensor_name=str(row.get("sensor_name") or ""),
         )
-        logger.info(
+        logger.debug(
             "[RestRepository] watch worker_id=%s sensor_id=%s hr=%s baseline_hr=%s",
             worker_id,
             sample.sensor_id,
@@ -180,7 +180,7 @@ class DatabaseHandlerRestDataRepository:
             space_id=_optional_int(row, "space_id"),
             space_name=str(row.get("space_name") or ""),
         )
-        logger.info(
+        logger.debug(
             "[RestRepository] worker_profile worker_id=%s name=%s sensor_id=%s space_id=%s age=%s baseline_hr=%s",
             profile.worker_id,
             profile.name,
