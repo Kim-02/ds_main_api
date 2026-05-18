@@ -157,7 +157,11 @@ def _extract_worker_vlm_text(result: dict) -> str:
     abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
     recommended_actions = result.get("recommended_actions") or []
 
-    # ① 행동 이상 (비틀거림·낙상) 먼저
+    behavior_obs = result.get("behavior_observation") if isinstance(result.get("behavior_observation"), dict) else {}
+    obs_detail = str(behavior_obs.get("detail") or "").strip()
+    _default_obs = "화면에서 자세·이동 패턴을 확인할 수 없습니다."
+
+    # ① CCTV 행동 관찰
     if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
         label = {
             "staggering": "비틀거림 감지",
@@ -166,11 +170,13 @@ def _extract_worker_vlm_text(result: dict) -> str:
             "leaning": "기댐 감지",
             "crouching": "쭈그림 감지",
         }.get(abnormal, abnormal)
-        behavior_obs = result.get("behavior_observation")
-        detail = ""
-        if isinstance(behavior_obs, dict) and behavior_obs.get("detail"):
-            detail = f" — {behavior_obs['detail']}"
-        parts.append(f"[행동 이상] {label}{detail}")
+        detail_suffix = f" — {obs_detail}" if obs_detail and obs_detail != _default_obs else ""
+        parts.append(f"[행동 이상] {label}{detail_suffix}")
+    elif abnormal == "normal":
+        obs_text = obs_detail if (obs_detail and obs_detail != _default_obs) else "정상 자세 확인"
+        parts.append(f"화면: {obs_text}")
+    elif abnormal in {"not_visible", "unknown"}:
+        parts.append("화면: 작업자 위치 미확인")
 
     # ② 작업자명 + 휴식 권고 레벨
     rest_label = _rest_recommendation_label(rest_rec) or _rest_recommendation_label(summary)
