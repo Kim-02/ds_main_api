@@ -107,46 +107,12 @@ def extract_vlm_text(result: Any) -> str:
 
         if target_type == "site":
             return _extract_site_vlm_text(result)
+        if target_type == "worker":
+            return _extract_worker_vlm_text(result)
 
-        parts = []
-        for key in (
-            "summary",
-            "reason",
-            "health_considerations",
-            "worker_location",
-            "rest_reason",
-            "recommended_action",
-            "recommended_actions",
-            "situation",
-            "evidence",
-            "raw_text",
-            "text",
-        ):
-            value = result.get(key)
-            if isinstance(value, list):
-                parts.extend(str(item).strip() for item in value if item)
-            elif value and str(value).strip() not in {"none", "unknown", "not_visible"}:
-                parts.append(str(value).strip())
-
-        # 비틀거림·낙상 탐지 시 알림 텍스트에 명시
-        abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
-        if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
-            label = {
-                "staggering": "비틀거림 감지",
-                "falling": "낙상 감지",
-                "slumping": "신체 축 처짐 감지",
-                "leaning": "기댐 감지",
-                "crouching": "쭈그림 감지",
-            }.get(abnormal, abnormal)
-            behavior_obs = result.get("behavior_observation")
-            detail = ""
-            if isinstance(behavior_obs, dict) and behavior_obs.get("detail"):
-                detail = f" — {behavior_obs['detail']}"
-            parts.insert(0, f"[행동 이상] {label}{detail}")
-
-        if parts:
-            return " | ".join(parts)
-        return json.dumps(result, ensure_ascii=False, default=str)
+        if result:
+            return json.dumps(result, ensure_ascii=False, default=str)
+        return ""
 
     if isinstance(result, list):
         return json.dumps(result, ensure_ascii=False, default=str)
@@ -178,6 +144,78 @@ def _extract_site_vlm_text(result: dict) -> str:
                 parts.append(f"조치: {text}")
 
     return " | ".join(parts) if parts else ""
+
+
+def _extract_worker_vlm_text(result: dict) -> str:
+    """worker_regression 모드 VLM 결과를 관리자 알림 텍스트로 변환한다."""
+    parts = []
+    target = result.get("target") or {}
+    worker_name = str(target.get("worker_name") or "").strip()
+    rest_rec = str(result.get("rest_recommendation") or "").strip()
+    summary = str(result.get("summary") or "").strip()
+    health = str(result.get("health_considerations") or "").strip()
+    abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
+    recommended_actions = result.get("recommended_actions") or []
+
+    # ① 행동 이상 (비틀거림·낙상) 먼저
+    if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
+        label = {
+            "staggering": "비틀거림 감지",
+            "falling": "낙상 감지",
+            "slumping": "신체 축 처짐 감지",
+            "leaning": "기댐 감지",
+            "crouching": "쭈그림 감지",
+        }.get(abnormal, abnormal)
+        behavior_obs = result.get("behavior_observation")
+        detail = ""
+        if isinstance(behavior_obs, dict) and behavior_obs.get("detail"):
+            detail = f" — {behavior_obs['detail']}"
+        parts.append(f"[행동 이상] {label}{detail}")
+
+    # ② 작업자명 + 휴식 권고 레벨
+    rest_label = _rest_recommendation_label(rest_rec) or _rest_recommendation_label(summary)
+    header = f"[{worker_name}] {rest_label}" if worker_name and rest_label else (summary or rest_label)
+    if header:
+        parts.append(header)
+
+    # ③ 건강 위험 요인 (라벨 제거하고 값만)
+    risk_text = _risk_factors_from_health_text(health)
+    if risk_text:
+        parts.append(f"위험요인: {risk_text}")
+
+    # ④ 조치 (중복 제거, dict 평탄화, 최대 2개)
+    seen: set[str] = set()
+    action_count = 0
+    for action in recommended_actions:
+        text = _action_text(action)
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(f"조치: {text}")
+            action_count += 1
+            if action_count >= 2:
+                break
+
+    return " | ".join(parts) if parts else summary
+
+
+def _rest_recommendation_label(text: str) -> str:
+    if not text:
+        return ""
+    if "반드시" in text:
+        return "즉시 휴식 필요"
+    if "강한" in text:
+        return "강한 휴식 권고"
+    if "약한" in text:
+        return "약한 휴식 권고"
+    return ""
+
+
+def _risk_factors_from_health_text(health: str) -> str:
+    """'등록 건강 유의요인: 고령, 고혈압' → '고령, 고혈압'"""
+    for separator in (":", "："):
+        if separator in health:
+            return health.split(separator, 1)[-1].strip()
+    return health.strip() if health else ""
 
 
 def _action_text(action: Any) -> str:
