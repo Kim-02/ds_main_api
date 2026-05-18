@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     vllm_host: str = "0.0.0.0"
     vllm_port: int = 1111
     vllm_dtype: str = "float16"
-    vllm_gpu_memory_utilization: float = 0.5
-    vllm_max_model_len: int = 8192
+    vllm_gpu_memory_utilization: float = 0.7
+    vllm_max_model_len: int = 4096
     vllm_max_num_seqs: int = 4
     vllm_max_num_batched_tokens: int = 8192
     vllm_limit_mm_per_prompt: str = "image=1,video=0"
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     yolo_warmup_on_startup: bool = True
     cctv_rtsp_url: str = ""
     cctv_vlm_yolo_context_seconds: float = 10.0
-    cctv_vlm_yolo_context_max_frames: int = 20
+    cctv_vlm_yolo_context_max_frames: int = 10
     cctv_vlm_yolo_context_frame_dir: str = "cctv_vlm_yolo_frames"
     cctv_vlm_yolo_context_saved_frames_keep_count: int = 240
     cctv_vlm_yolo_context_prompt_max_chars: int = 420
@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     camera_vlm_request_timeout_seconds: int = 90
     camera_vlm_prompt_max_chars: int = 5600
     camera_vlm_retry_prompt_max_chars: int = 1100
-    camera_vlm_max_tokens: int = 512
+    camera_vlm_max_tokens: int = 256
     rest_forced_rest_work_minutes: int = 120
     rest_default_age: int = 40
     rest_default_gender: int = 1
