@@ -119,6 +119,7 @@ def start_registered_camera_runtime_components(
                         rtsp_url=str(video_path),
                         process_id=int(row.get("space_id") or 0),
                         camera_meta=_demo_camera_meta(row, video_path),
+                        force_fire_pipeline=True,
                     )
                     started += 1
                     status_str = "started_demo"
@@ -201,6 +202,7 @@ def start_video_pipeline_from_file(data: VideoPipelineStartReq) -> dict:
         rtsp_url=str(video_path),
         process_id=space_id,
         camera_meta=camera_meta,
+        force_fire_pipeline=True,
     )
 
     logger.info(
@@ -289,6 +291,7 @@ def _start_runtime_components(
     rtsp_url: str,
     process_id: int,
     camera_meta: dict[str, Any] | None = None,
+    force_fire_pipeline: bool = False,
 ) -> None:
     """카메라 등록/복구 후 RTSP reader, 10초 버퍼, fire pipeline을 시작한다."""
     try:
@@ -306,6 +309,12 @@ def _start_runtime_components(
             buffer_seconds=settings.frame_buffer_seconds,
             sample_interval=settings.frame_buffer_sample_interval_seconds,
         )
+        logger.info(
+            "CCTV runtime reader/buffer ready cam_id=%s process_id=%s source=%s",
+            cam_id,
+            process_id,
+            rtsp_url,
+        )
     except Exception:
         logger.warning(
             "RTSP reader/buffer 시작 실패 (cam_id=%s, rtsp=%s) — DB 등록은 유지됩니다.",
@@ -313,14 +322,23 @@ def _start_runtime_components(
             rtsp_url,
         )
 
-    if settings.fire_pipeline_enabled:
+    fire_enabled = bool(settings.fire_pipeline_enabled) or bool(force_fire_pipeline)
+    if fire_enabled:
         try:
             from cctv.fire_pipeline import manager as fire_manager
-            fire_manager.start_pipeline(cam_id, rtsp_url, metadata=camera_meta)
+            started = fire_manager.start_pipeline(cam_id, rtsp_url, metadata=camera_meta)
+            if not started:
+                logger.info("FirePipeline already active or not started cam_id=%s source=%s", cam_id, rtsp_url)
         except ImportError:
             logger.warning("fire_pipeline 모듈 없음 — 파이프라인 건너뜀 (cam_id=%s)", cam_id)
         except Exception:
             logger.warning("fire pipeline 시작 실패 (cam_id=%s) — DB 등록은 유지됩니다.", cam_id)
+    else:
+        logger.info(
+            "FirePipeline skipped cam_id=%s reason=fire_pipeline_enabled_false source=%s",
+            cam_id,
+            rtsp_url,
+        )
 
 
 def _stop_runtime_components(cam_id: int) -> None:
@@ -542,6 +560,33 @@ def start_fire_pipeline(
             detail="Camera not found",
         )
 
+    if row.get("is_demo"):
+        demo_video_key = row.get("demo_video_key") or "scenario3_fire"
+        relative_path = DEMO_VIDEO_MAP.get(demo_video_key)
+        if not relative_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"demo_video_key='{demo_video_key}'에 대응하는 영상 경로가 없습니다.",
+            )
+        video_path = (Path.cwd() / relative_path).resolve()
+        if not video_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"서버 demo 영상 파일이 없습니다: {relative_path}",
+            )
+        _start_runtime_components(
+            cam_id=int(sensor_id),
+            rtsp_url=str(video_path),
+            process_id=int(row.get("space_id") or 0),
+            camera_meta=_demo_camera_meta(row, video_path),
+            force_fire_pipeline=True,
+        )
+        return {
+            "status": "started",
+            "sensor_id": sensor_id,
+            "camera_id": sensor_id,
+        }
+
     try:
         from cctv.fire_pipeline import manager as fire_manager
     except ImportError:
@@ -748,6 +793,7 @@ def register_demo_camera(
                     rtsp_url=str(video_path),
                     process_id=int(data.space_id),
                     camera_meta=_demo_camera_meta(result, video_path),
+                    force_fire_pipeline=True,
                 )
                 logger.info("Demo CCTV runtime started sen_id=%s video=%s", sen_id, video_path)
             except Exception as exc:
@@ -826,6 +872,7 @@ def analyze_demo_camera(
         rtsp_url=str(video_path),
         process_id=int(row.get("space_id") or 0),
         camera_meta=_demo_camera_meta(row, video_path),
+        force_fire_pipeline=True,
     )
 
     logger.info(
