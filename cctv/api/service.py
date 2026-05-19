@@ -13,11 +13,18 @@ from fastapi import HTTPException, status
 from config import settings
 from database.db_handler import DatabaseHandler
 
-from .schemas import AppCameraRegisterReq, CameraCreate, CameraUpdate, VideoPipelineStartReq
+from .schemas import AppCameraRegisterReq, CameraCreate, CameraUpdate, DemoCctvRegisterReq, VideoPipelineStartReq
 
 logger = logging.getLogger(__name__)
 
 _VIDEO_RUNTIME_REGISTRY: dict[int, dict[str, Any]] = {}
+
+# 시연용 영상 파일 경로 매핑
+# 앱 내부 raw 리소스(app/src/main/res/raw/scenario3_fire.mp4)와는 별개로,
+# 서버 VLM 분석용 파일은 아래 경로에 별도로 준비해야 합니다.
+DEMO_VIDEO_MAP: dict[str, str] = {
+    "scenario3_fire": "media/demo_videos/scenario3_fire.mp4",
+}
 
 
 def build_rtsp_url(
@@ -613,6 +620,124 @@ def _space_id_from_payload(data: Any) -> int | None:
     if space_id is None:
         space_id = getattr(data, "process_id", None)
     return space_id
+
+
+def register_demo_camera(
+    db: DatabaseHandler,
+    data: DemoCctvRegisterReq,
+) -> dict:
+    """시연용 가상 CCTV를 DB에 등록한다. 실제 네트워크 연결 검증 없이 즉시 등록."""
+    jetson_id = data.jetson_id
+    if jetson_id is None:
+        # jetson_id 미전달 시 DB의 첫 번째 Jetson 사용
+        import pymysql
+        try:
+            with db._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT jetson_id FROM jetson ORDER BY jetson_id LIMIT 1")
+                    row = cursor.fetchone()
+                    if row:
+                        jetson_id = int(row["jetson_id"])
+        except Exception:
+            pass
+
+    if jetson_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Jetson 정보를 찾을 수 없습니다. jetson_id를 직접 전달하거나 Jetson을 먼저 등록하세요.",
+        )
+
+    row = db.register_demo_camera(
+        space_id=data.space_id,
+        jetson_id=jetson_id,
+        name=data.name,
+        demo_video_key=data.demo_video_key,
+    )
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="시연용 CCTV 등록에 실패했습니다.",
+        )
+
+    logger.info(
+        "Demo CCTV registered space_id=%s jetson_id=%s demo_video_key=%s sen_id=%s",
+        data.space_id, jetson_id, data.demo_video_key, row.get("sen_id"),
+    )
+    return row
+
+
+def analyze_demo_camera(
+    db: DatabaseHandler,
+    camera_sen_id: int,
+    broadcast_fn=None,
+) -> dict:
+    """시연용 CCTV의 demo video를 VLM/fire_pipeline 분석에 넘긴다.
+
+    서버 파일 경로: media/demo_videos/{demo_video_key}.mp4
+    앱 파일 경로(앱 내부): app/src/main/res/raw/{demo_video_key}.mp4 — 별개의 파일
+    """
+    row = db.get_cctv_by_sen_id(camera_sen_id)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"카메라 정보를 찾을 수 없습니다. camera_sen_id={camera_sen_id}",
+        )
+
+    if not row.get("is_demo"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="시연용 CCTV가 아닙니다. is_demo=1인 카메라만 demo/analyze를 사용할 수 있습니다.",
+        )
+
+    demo_video_key = row.get("demo_video_key") or "scenario3_fire"
+    relative_path = DEMO_VIDEO_MAP.get(demo_video_key)
+    if not relative_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"demo_video_key='{demo_video_key}'에 대응하는 영상 경로가 없습니다.",
+        )
+
+    video_path = (Path.cwd() / relative_path).resolve()
+    if not video_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"서버 demo 영상 파일이 없습니다: {relative_path}\n"
+                "Jetson 서버에 media/demo_videos/scenario3_fire.mp4 파일을 추가하세요.\n"
+                "※ 앱 내부 raw 영상(app/src/main/res/raw/)과는 별개의 파일입니다."
+            ),
+        )
+
+    try:
+        from cctv.fire_pipeline import manager as fire_manager
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="fire_pipeline 모듈이 설치되지 않았습니다.",
+        )
+
+    import uuid
+    scenario_id = str(uuid.uuid4())
+
+    ok = fire_manager.start_pipeline(
+        camera_id=camera_sen_id,
+        rtsp_url=str(video_path),
+    )
+    if not ok:
+        logger.warning("Demo analyze pipeline already running camera_sen_id=%s", camera_sen_id)
+
+    logger.info(
+        "Demo VLM analysis started camera_sen_id=%s video_path=%s scenario_id=%s",
+        camera_sen_id, video_path, scenario_id,
+    )
+
+    return {
+        "success": True,
+        "message": "Demo VLM 분석을 시작했습니다. 분석 결과는 WebSocket /ws/alerts로 전달됩니다.",
+        "camera_id": camera_sen_id,
+        "scenario_id": scenario_id,
+    }
 
 
 def _parse_create_camera(data: CameraCreate) -> dict:

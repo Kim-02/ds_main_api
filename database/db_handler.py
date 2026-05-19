@@ -2232,11 +2232,14 @@ class DatabaseHandler:
                             s.sen_locate,
                             s.model,
                             s.is_online,
+                            ci.is_demo,
+                            ci.demo_video_key,
                             latest.temp   AS latest_temp,
                             latest.humid  AS latest_humidity,
                             latest.time   AS latest_measured_at
                         FROM sensor_map_position p
                         JOIN sensor s ON p.sensor_id = s.sensor_id
+                        LEFT JOIN camera_info ci ON ci.sen_id = s.sen_id
                         LEFT JOIN (
                             SELECT t.sen_id, t.temp, t.humid, t.time
                             FROM th_trans t
@@ -2270,6 +2273,7 @@ class DatabaseHandler:
         """space_id 기준 배치 가능한 CCTV 목록을 반환한다.
 
         map_id를 전달하면 해당 맵에 이미 배치된 CCTV에 placed=1을 함께 반환한다.
+        demo_camera 타입도 포함한다.
         """
         try:
             with self._get_connection() as conn:
@@ -2289,13 +2293,15 @@ class DatabaseHandler:
                                 c.health,
                                 IF(p.sensor_id IS NOT NULL, 1, 0) AS placed,
                                 p.x_ratio,
-                                p.y_ratio
+                                p.y_ratio,
+                                c.is_demo,
+                                c.demo_video_key
                             FROM camera_info c
                             JOIN sensor s ON c.sen_id = s.sen_id
                             LEFT JOIN sensor_map_position p
                                 ON p.sensor_id = s.sensor_id AND p.map_id = %s
                             WHERE COALESCE(c.space_id, s.space_id) = %s
-                              AND s.sensor_type IN ('camera', 'cctv')
+                              AND s.sensor_type IN ('camera', 'cctv', 'demo_camera')
                             ORDER BY s.sen_name
                             """,
                             (map_id, space_id),
@@ -2315,11 +2321,13 @@ class DatabaseHandler:
                                 c.health,
                                 0 AS placed,
                                 NULL AS x_ratio,
-                                NULL AS y_ratio
+                                NULL AS y_ratio,
+                                c.is_demo,
+                                c.demo_video_key
                             FROM camera_info c
                             JOIN sensor s ON c.sen_id = s.sen_id
                             WHERE COALESCE(c.space_id, s.space_id) = %s
-                              AND s.sensor_type IN ('camera', 'cctv')
+                              AND s.sensor_type IN ('camera', 'cctv', 'demo_camera')
                             ORDER BY s.sen_name
                             """,
                             (space_id,),
@@ -2329,6 +2337,87 @@ class DatabaseHandler:
         except Exception as e:
             logging.error("get_available_cctvs_for_map 오류: %s", e)
             return []
+
+    def register_demo_camera(
+        self,
+        space_id: int,
+        jetson_id: int,
+        name: str = "시연용 화재 CCTV",
+        demo_video_key: str = "scenario3_fire",
+    ) -> dict | None:
+        """시연용 가상 CCTV를 sensor + camera_info에 등록한다.
+
+        같은 space_id + demo_video_key 조합이 이미 있으면 기존 항목을 반환한다.
+        """
+        sensor_id = f"demo-camera-{demo_video_key}-space-{space_id}"
+        ip_address = f"demo://{demo_video_key}"
+
+        try:
+            with self._get_connection() as conn:
+                try:
+                    with conn.cursor() as cursor:
+                        conn.begin()
+
+                        # 중복 확인
+                        cursor.execute(
+                            "SELECT sen_id FROM sensor WHERE sensor_id = %s LIMIT 1",
+                            (sensor_id,),
+                        )
+                        existing = cursor.fetchone()
+                        if existing:
+                            return self.get_cctv_by_sen_id(existing["sen_id"])
+
+                        # jetson 위치 정보 조회
+                        cursor.execute(
+                            "SELECT jetson_loc, space_id FROM jetson WHERE jetson_id = %s LIMIT 1",
+                            (jetson_id,),
+                        )
+                        jetson = cursor.fetchone()
+                        sen_locate = (jetson["jetson_loc"] if jetson else None) or "시연용"
+
+                        cursor.execute(
+                            """
+                            INSERT INTO sensor (
+                                sensor_id, jetson_id, sensor_type,
+                                sen_name, sen_locate, model,
+                                mqtt_topic, is_online,
+                                last_seen_at, registered_at, created_at, updated_at,
+                                space_id
+                            ) VALUES (
+                                %s, %s, 'demo_camera',
+                                %s, %s, 'DEMO_FIRE_VIDEO',
+                                NULL, 1,
+                                NOW(), NOW(), NOW(), NOW(),
+                                %s
+                            )
+                            """,
+                            (sensor_id, jetson_id, name, sen_locate, space_id),
+                        )
+                        new_sen_id = cursor.lastrowid
+
+                        cursor.execute(
+                            """
+                            INSERT INTO camera_info (
+                                sen_id, ip_address, camera_id, camera_pw,
+                                health, space_id, is_demo, demo_video_key
+                            ) VALUES (
+                                %s, %s, %s, NULL,
+                                1, %s, 1, %s
+                            )
+                            """,
+                            (new_sen_id, ip_address, demo_video_key, space_id, demo_video_key),
+                        )
+
+                    conn.commit()
+                    return self.get_cctv_by_sen_id(new_sen_id)
+
+                except Exception:
+                    conn.rollback()
+                    raise
+
+        except Exception as e:
+            logging.error("register_demo_camera 오류: %s", e)
+            return None
 
     def get_registered_sensors_by_jetson_id(
         self,

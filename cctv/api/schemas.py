@@ -109,3 +109,24 @@ class VideoPipelineActionResponse(BaseModel):
     rtsp_reader: dict[str, Any] = Field(default_factory=dict)
     frame_buffer: dict[str, Any] = Field(default_factory=dict)
     fire_pipeline: dict[str, Any] = Field(default_factory=dict)
+
+
+class DemoCctvRegisterReq(BaseModel):
+    """앱에서 시연용 가상 CCTV를 등록할 때 사용하는 요청 스키마."""
+    space_id: int
+    jetson_id: Optional[int] = None
+    name: str = "시연용 화재 CCTV"
+    demo_video_key: str = "scenario3_fire"
+
+
+class DemoCctvRegisterResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[dict] = None
+
+
+class DemoAnalyzeResponse(BaseModel):
+    success: bool
+    message: str
+    camera_id: Optional[int] = None
+    scenario_id: Optional[str] = None

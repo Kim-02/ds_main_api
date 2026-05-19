@@ -14,6 +14,9 @@ from .schemas import (
     CameraCreate,
     CameraOut,
     CameraUpdate,
+    DemoAnalyzeResponse,
+    DemoCctvRegisterReq,
+    DemoCctvRegisterResponse,
     FirePipelineActionResponse,
     FirePipelineStatus,
     VideoPipelineActionResponse,
@@ -235,6 +238,48 @@ def register_camera_from_app(
     request: Request,
 ):
     return service.register_camera_from_app(request.app.state.db, data)
+
+
+@router.post(
+    "/register-demo",
+    response_model=DemoCctvRegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="시연용 가상 CCTV 등록",
+    description=(
+        "실제 IP 카메라 없이 demo video를 연결한 가상 CCTV를 DB에 등록한다.\n"
+        "등록 후 평면도에 배치 가능하며, 클릭 시 앱 내부 raw 영상이 재생된다.\n"
+        "같은 space_id + demo_video_key 조합이 이미 있으면 기존 항목을 반환한다."
+    ),
+)
+def register_demo_camera(
+    data: DemoCctvRegisterReq,
+    request: Request,
+):
+    row = service.register_demo_camera(request.app.state.db, data)
+    return {
+        "success": True,
+        "message": "시연용 CCTV가 등록되었습니다.",
+        "data": row,
+    }
+
+
+@router.post(
+    "/{camera_sen_id}/demo/analyze",
+    response_model=DemoAnalyzeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="시연용 CCTV demo video VLM 분석 실행",
+    description=(
+        "서버의 media/demo_videos/{demo_video_key}.mp4 파일을 fire_pipeline으로 분석한다.\n"
+        "분석 결과는 기존과 동일하게 alert_event에 저장되고 WebSocket /ws/alerts로 브로드캐스트된다.\n"
+        "※ 서버 분석용 영상(media/demo_videos/)과 앱 내부 raw 영상은 별개 파일입니다."
+    ),
+)
+def analyze_demo_camera(
+    camera_sen_id: int,
+    request: Request,
+):
+    result = service.analyze_demo_camera(request.app.state.db, camera_sen_id)
+    return result
 
 
 @router.post(
