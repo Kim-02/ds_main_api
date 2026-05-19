@@ -11,8 +11,35 @@ import os
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse, unquote
 
 logger = logging.getLogger(__name__)
+
+# 여러 카메라가 동시에 열릴 때 OPENCV_FFMPEG_CAPTURE_OPTIONS 환경변수 경쟁 방지
+_cap_open_lock = threading.Lock()
+
+
+def _split_rtsp_credentials(rtsp_url: str) -> tuple[str, str, str]:
+    """RTSP URL에서 자격증명을 분리해 (clean_url, username, password)를 반환한다.
+
+    URL에 포함된 percent-encoded 문자(%40 등)를 디코딩해서 raw 값을 반환한다.
+    일부 Jetson FFMPEG 버전이 %40을 @으로 디코딩하지 않아 401이 발생하는 문제를 우회한다.
+    """
+    parsed = urlparse(rtsp_url)
+    username = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+
+    if not username and not password:
+        return rtsp_url, "", ""
+
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    clean_url = f"{parsed.scheme}://{host}{parsed.path}"
+    if parsed.query:
+        clean_url += f"?{parsed.query}"
+
+    return clean_url, username, password
 
 
 @dataclass
@@ -89,26 +116,36 @@ class RtspReader:
             self.running = False
             return
 
-        if str(self.rtsp_url).startswith("rtsp://"):
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
-            )
+        is_rtsp = str(self.rtsp_url).startswith("rtsp://")
+        if is_rtsp:
+            cap_url, username, password = _split_rtsp_credentials(self.rtsp_url)
+        else:
+            cap_url, username, password = self.rtsp_url, "", ""
 
         while self.running:
             cap = None
 
             try:
-                if str(self.rtsp_url).startswith("rtsp://"):
-                    cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                if is_rtsp:
+                    base_opts = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
+                    if username or password:
+                        # %40 등 인코딩 문자를 raw 값으로 전달해 FFMPEG 인증 오류 방지
+                        base_opts += f"|user;{username}|password;{password}"
+                    with _cap_open_lock:
+                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = base_opts
+                        cap = cv2.VideoCapture(cap_url, cv2.CAP_FFMPEG)
                 else:
-                    cap = cv2.VideoCapture(self.rtsp_url)
+                    cap = cv2.VideoCapture(cap_url)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 frame_interval = self._frame_interval(cap)
 
                 if not cap.isOpened():
                     self._set_opened(False)
                     self._set_error("rtsp_open_failed")
-                    logger.warning("RTSP open failed camera_id=%s rtsp=%s", self.camera_id, self.rtsp_url)
+                    logger.warning(
+                        "RTSP open failed camera_id=%s url=%s",
+                        self.camera_id, cap_url,
+                    )
                     time.sleep(self.reconnect_delay)
                     continue
 
