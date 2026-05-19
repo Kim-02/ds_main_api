@@ -1523,7 +1523,10 @@ class DatabaseHandler:
                             c.camera_id,
                             c.camera_pw,
                             c.health,
+                            c.is_demo,
+                            c.demo_video_key,
                             s.sensor_id,
+                            s.sensor_type,
                             s.sen_name,
                             s.sen_locate,
                             s.is_online,
@@ -1540,7 +1543,7 @@ class DatabaseHandler:
                         LEFT JOIN ds_space sp
                           ON COALESCE(c.space_id, s.space_id) = sp.space_id
                         WHERE c.sen_id = %s
-                          AND s.sensor_type IN ('camera', 'cctv')
+                          AND s.sensor_type IN ('camera', 'cctv', 'demo_camera')
                         LIMIT 1
                         """,
                         (sen_id,),
