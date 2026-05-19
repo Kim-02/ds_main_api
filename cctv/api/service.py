@@ -73,13 +73,30 @@ def start_registered_camera_runtime_components(
     cameras = []
 
     for row in rows:
-        # 시연용 CCTV는 실제 RTSP 연결이 없으므로 runtime 시작 생략
         if row.get("is_demo"):
+            # 시연용 CCTV는 RTSP 없이 video 파일로 fire pipeline만 시작
+            demo_video_key = row.get("demo_video_key") or "scenario3_fire"
+            relative_path = DEMO_VIDEO_MAP.get(demo_video_key)
+            video_path = (Path.cwd() / relative_path).resolve() if relative_path else None
+            if video_path and video_path.exists():
+                try:
+                    from cctv.fire_pipeline import manager as fire_manager
+                    fire_manager.start_pipeline(
+                        camera_id=int(row["sen_id"]),
+                        rtsp_url=str(video_path),
+                    )
+                    started += 1
+                    status_str = "started_demo"
+                except Exception as exc:
+                    failed += 1
+                    status_str = f"failed: {exc}"
+            else:
+                status_str = "skipped_demo_no_video"
             cameras.append({
                 "sensor_id": row.get("sensor_id"),
                 "sen_id": row.get("sen_id"),
                 "camera_id": row.get("sen_id"),
-                "status": "skipped_demo",
+                "status": status_str,
             })
             continue
 
@@ -670,11 +687,32 @@ def register_demo_camera(
             detail="시연용 CCTV 등록에 실패했습니다. 서버 로그를 확인하세요.",
         )
 
+    sen_id = result.get("sen_id")
     logger.info(
         "Demo CCTV registered space_id=%s jetson_id=%s demo_video_key=%s sen_id=%s",
-        data.space_id, jetson_id, data.demo_video_key, result.get("sen_id"),
+        data.space_id, jetson_id, data.demo_video_key, sen_id,
     )
-    # datetime 없는 단순 dict만 반환 (serialization 안전)
+
+    # 등록 즉시 fire pipeline 시작 (실제 CCTV와 동일한 동작)
+    relative_path = DEMO_VIDEO_MAP.get(data.demo_video_key)
+    if relative_path and sen_id is not None:
+        video_path = (Path.cwd() / relative_path).resolve()
+        if video_path.exists():
+            try:
+                from cctv.fire_pipeline import manager as fire_manager
+                fire_manager.start_pipeline(
+                    camera_id=int(sen_id),
+                    rtsp_url=str(video_path),
+                )
+                logger.info("Demo CCTV fire pipeline started sen_id=%s video=%s", sen_id, video_path)
+            except Exception as exc:
+                logger.warning("Demo CCTV fire pipeline 시작 실패 sen_id=%s: %s", sen_id, exc)
+        else:
+            logger.warning(
+                "Demo CCTV 영상 파일 없음 — fire pipeline 미시작 sen_id=%s path=%s",
+                sen_id, video_path,
+            )
+
     return result
 
 
