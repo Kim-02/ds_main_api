@@ -60,6 +60,13 @@ class ExportFinalPipeline:
             config.normalized_keep_count,
             config.danger_classes
         )
+        self.yolo_summary_interval_seconds = float(getattr(config, "yolo_summary_interval_seconds", 10.0))
+        self.yolo_summary_started_at = time.monotonic()
+        self.yolo_summary_frames = 0
+        self.yolo_summary_fire_frames = 0
+        self.yolo_summary_smoke_frames = 0
+        self.yolo_summary_person_frames = 0
+        self.yolo_summary_last_detections = "none"
 
     def start(self):
         if self.config.clean_on_start:
@@ -98,6 +105,7 @@ class ExportFinalPipeline:
             self.run_capture_loop()
         finally:
             self.running = False
+            logger.info("FirePipeline stopped camera_id=%s", self.config.camera_id)
             self.yolo_queue.put(None)
             yolo_thread.join()
 
@@ -160,7 +168,7 @@ class ExportFinalPipeline:
                         (frame_number, current_time, frame.copy())
                     )
                     if frame_number == 1 or frame_number % 20 == 0:
-                        logger.info(
+                        logger.debug(
                             "[FirePipeline] queued direct frame camera_id=%s frame=%s time=%.2f queue=%s",
                             self.config.camera_id,
                             frame_number,
@@ -243,7 +251,7 @@ class ExportFinalPipeline:
                     (frame_number, current_time, latest["frame"].copy())
                 )
                 if frame_number == 1 or frame_number % 20 == 0:
-                    logger.info(
+                    logger.debug(
                         "[FirePipeline] frame buffer consumed camera_id=%s frame=%s time=%.2f buffer_frames=%s queue=%s",
                         camera_id,
                         frame_number,
@@ -301,6 +309,41 @@ class ExportFinalPipeline:
             status,
         )
 
+    def record_yolo_summary(self, detections):
+        self.yolo_summary_frames += 1
+        if self._has_detection_class(detections, "fire"):
+            self.yolo_summary_fire_frames += 1
+        if self._has_detection_class(detections, "smoke"):
+            self.yolo_summary_smoke_frames += 1
+        if self._has_detection_class(detections, "person"):
+            self.yolo_summary_person_frames += 1
+
+        self.yolo_summary_last_detections = get_count_text(detections)
+        elapsed = time.monotonic() - self.yolo_summary_started_at
+        if elapsed >= self.yolo_summary_interval_seconds:
+            logger.info(
+                "[YOLO_SUMMARY] camera_id=%s interval=%.0fs frames=%s fire_frames=%s smoke_frames=%s person_frames=%s last_detections=%s",
+                self.config.camera_id,
+                elapsed,
+                self.yolo_summary_frames,
+                self.yolo_summary_fire_frames,
+                self.yolo_summary_smoke_frames,
+                self.yolo_summary_person_frames,
+                self.yolo_summary_last_detections,
+            )
+            self.yolo_summary_started_at = time.monotonic()
+            self.yolo_summary_frames = 0
+            self.yolo_summary_fire_frames = 0
+            self.yolo_summary_smoke_frames = 0
+            self.yolo_summary_person_frames = 0
+            self.yolo_summary_last_detections = "none"
+
+    def _has_detection_class(self, detections, class_name):
+        for detection in detections:
+            if detection.get("class") == class_name:
+                return True
+        return False
+
     def yolo_worker(self):
         logger.info(
             "[YOLO] worker start camera_id=%s model=%s",
@@ -333,7 +376,7 @@ class ExportFinalPipeline:
             frame_number, frame_time, frame = item
             should_log_frame = frame_number == 1 or frame_number % 20 == 0
             if should_log_frame:
-                logger.info(
+                logger.debug(
                     "[YOLO] inference start camera_id=%s frame=%s time=%.2f",
                     self.config.camera_id,
                     frame_number,
@@ -353,7 +396,7 @@ class ExportFinalPipeline:
             frame_path = self.storage.save_frame(frame_number, frame)
             count_text = get_count_text(detections)
             if should_log_frame or detections:
-                logger.info(
+                logger.debug(
                     "[YOLO] inference end camera_id=%s frame=%s time=%.2f detections=%s count=%s",
                     self.config.camera_id,
                     frame_number,
@@ -361,6 +404,7 @@ class ExportFinalPipeline:
                     count_text,
                     len(detections),
                 )
+            self.record_yolo_summary(detections)
 
             self.log_status(
                 "[YOLO]",
@@ -393,7 +437,7 @@ class ExportFinalPipeline:
             summary, history = self.normalizer.make_history_with_live_summary(completed_summary)
             self.submit_vlm_if_idle(summary, history, frame_time)
         elif frame_number == 1 or frame_number % 20 == 0 or detections:
-            logger.info(
+            logger.debug(
                 "[FirePipeline] VLM trigger skipped camera_id=%s frame=%s time=%.2f reason=no_fire_or_smoke detections=%s",
                 self.config.camera_id,
                 frame_number,
@@ -403,7 +447,7 @@ class ExportFinalPipeline:
 
     def submit_vlm_if_idle(self, summary, history, frame_time):
         if summary is None:
-            logger.info(
+            logger.debug(
                 "[FirePipeline] VLM trigger skipped camera_id=%s time=%.2f reason=normalized_summary_not_ready",
                 self.config.camera_id,
                 frame_time,
@@ -413,7 +457,7 @@ class ExportFinalPipeline:
 
         with self.vlm_cycle_lock:
             if self.vlm_cycle_busy:
-                logger.info(
+                logger.debug(
                     "[FirePipeline] VLM trigger skipped camera_id=%s time=%.2f reason=vlm_cycle_busy",
                     self.config.camera_id,
                     frame_time,
@@ -479,10 +523,13 @@ class ExportFinalPipeline:
             )
             validation = validator.validate(summary, request_number, history)
             logger.info(
-                "[FirePipeline] VLM validation response received camera_id=%s request=%s result=%s",
+                "[FirePipeline] VLM validation response received camera_id=%s request=%s movement_valid=%s person_direction=%s fire_direction=%s smoke_direction=%s",
                 self.config.camera_id,
                 request_number,
-                validation,
+                validation.get("movement_valid"),
+                validation.get("person_direction"),
+                validation.get("fire_direction"),
+                validation.get("smoke_direction"),
             )
             summary["vlm_validation"] = validation
             summary["comparison_image_path"] = validation.get("comparison_image_path", "")
@@ -523,7 +570,7 @@ class ExportFinalPipeline:
                     request_number,
                     len(str(answer or "")),
                 )
-                self.emit_result(answer)
+                self.emit_result(answer, request_number=request_number)
             except Exception as error:
                 logger.exception(
                     "[FirePipeline] VLM analysis failed camera_id=%s request=%s",
@@ -551,7 +598,7 @@ class ExportFinalPipeline:
             None
         )
 
-    def emit_result(self, answer):
+    def emit_result(self, answer, request_number=None):
         self.set_latest_result(answer)
         logger.info(
             "[VLM TEXT] event_type=fire_pipeline camera_id=%s text=%s",
@@ -560,7 +607,7 @@ class ExportFinalPipeline:
         )
 
         if self.on_result is not None:
-            self.on_result(answer)
+            self.on_result(answer, request_number=request_number)
 
         if self.config.print_result:
             print(answer, flush=True)
