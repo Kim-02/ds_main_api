@@ -73,6 +73,11 @@ class CameraOut(BaseModel):
     registered_at: Optional[datetime] = None
     camera: Optional[CameraDetail] = None
 
+    is_demo: bool = False
+    demo_video_key: Optional[str] = None
+
+    registered_at: Optional[datetime] = None
+    camera: Optional[CameraDetail] = None
 
 class FirePipelineStatus(BaseModel):
     sensor_id: int

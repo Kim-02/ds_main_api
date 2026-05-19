@@ -2357,11 +2357,26 @@ class DatabaseHandler:
                         (map_id,),
                     )
                     rows = cursor.fetchall()
+
                     for row in rows:
                         if row.get("latest_measured_at") is not None:
                             val = row["latest_measured_at"]
                             if hasattr(val, "isoformat"):
                                 row["latest_measured_at"] = val.isoformat()
+
+                        row["is_demo"] = bool(row.get("is_demo", 0))
+
+                        sensor_type = str(row.get("sensor_type") or "").lower()
+                        is_camera = (
+                            "camera" in sensor_type
+                            or "cctv" in sensor_type
+                            or "rtsp" in sensor_type
+                            or "demo" in sensor_type
+                        )
+
+                        row["is_camera"] = is_camera
+                        row["camera_sen_id"] = row.get("sen_id") if is_camera else None
+
                     return rows
 
         except Exception as e:
@@ -2501,9 +2516,28 @@ class DatabaseHandler:
                         )
 
                     rows = cursor.fetchall()
+
+                    normalized = []
+                    for row in rows:
+                        item = dict(row)
+
+                        item["is_demo"] = bool(item.get("is_demo", 0))
+                        item["placed"] = bool(item.get("placed", 0))
+
+                        # 앱에서 Boolean으로 받는 필드면 이것도 변환
+                        item["is_online"] = bool(item.get("is_online", 0))
+                        item["health"] = bool(item.get("health", 0))
+
+                        # 앱에서 camera_sen_id를 기대한다면 추가
+                        item["camera_sen_id"] = item.get("sen_id")
+
+                        normalized.append(item)
+
                     logging.info(
-                        "[MAP_CCTV_DB] available-cctvs space_id=%s map_id=%s result_count=%s rows=%s",
-                        space_id, map_id, len(rows),
+                        "[MAP_CCTV_DB] available-cctvs normalized space_id=%s map_id=%s result_count=%s rows=%s",
+                        space_id,
+                        map_id,
+                        len(normalized),
                         [
                             {
                                 "sen_id": r.get("sen_id"),
@@ -2511,11 +2545,13 @@ class DatabaseHandler:
                                 "sensor_type": r.get("sensor_type"),
                                 "is_demo": r.get("is_demo"),
                                 "placed": r.get("placed"),
+                                "camera_sen_id": r.get("camera_sen_id"),
                             }
-                            for r in rows
+                            for r in normalized
                         ],
                     )
-                    return rows
+
+                    return normalized
 
         except Exception as e:
             logging.error("get_available_cctvs_for_map 오류: %s", e, exc_info=True)
