@@ -61,6 +61,25 @@ class DatabaseHandler:
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+    def _to_bool(self, value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "y", "on")
+        return bool(value)
+
+
+    def _normalize_bool_fields(self, row: dict, fields: list[str]) -> dict:
+        """row 안의 지정 필드를 bool로 변환한다."""
+        for field in fields:
+            if field in row:
+                row[field] = self._to_bool(row.get(field))
+        return row
 
     # ------------------------------------------------------------------
     # Jetson 관리
@@ -2257,7 +2276,12 @@ class DatabaseHandler:
                             """,
                             (space_id, *TH_TYPES),
                         )
-                    return cursor.fetchall()
+                    
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        self._normalize_bool_fields(row, ["is_online", "placed"])
+                    return rows
+                
         except Exception as e:
             logging.error("get_registered_sensors_by_space_id 오류: %s", e)
             return []
@@ -2364,13 +2388,11 @@ class DatabaseHandler:
                             if hasattr(val, "isoformat"):
                                 row["latest_measured_at"] = val.isoformat()
 
-                        row["is_demo"] = bool(row.get("is_demo", 0))
-                        row["is_online"] = bool(row.get("is_online", 0))
-                        
+                        self._normalize_bool_fields(row, ["is_online", "is_demo"])
+
                         sensor_type = str(row.get("sensor_type") or "").lower()
                         is_camera = (
-                            row["is_demo"]
-                            or "camera" in sensor_type
+                            "camera" in sensor_type
                             or "cctv" in sensor_type
                             or "rtsp" in sensor_type
                             or "demo" in sensor_type
@@ -2378,17 +2400,6 @@ class DatabaseHandler:
 
                         row["is_camera"] = is_camera
                         row["camera_sen_id"] = row.get("sen_id") if is_camera else None
-
-                        # stream_url: 앱이 CCTV 클릭 시 어떻게 열지 구분하는 데 사용
-                        if row["is_demo"]:
-                            demo_key = row.get("demo_video_key") or "scenario3_fire"
-                            row["stream_url"] = f"demo://{demo_key}"
-                        elif is_camera and row.get("sen_id"):
-                            row["stream_url"] = (
-                                f"/api/v1/cctv/cameras/{row['sen_id']}/stream?source=buffer"
-                            )
-                        else:
-                            row["stream_url"] = None
 
                     return rows
 
@@ -2767,7 +2778,12 @@ class DatabaseHandler:
                             """,
                             (jetson_id, *TH_TYPES),
                         )
-                    return cursor.fetchall()
+                    rows = cursor.fetchall()
+
+                    for row in rows:
+                        self._normalize_bool_fields(row, ["is_online", "placed"])
+
+                    return rows
 
         except Exception as e:
             logging.error("get_registered_sensors_by_jetson_id 오류: %s", e)
