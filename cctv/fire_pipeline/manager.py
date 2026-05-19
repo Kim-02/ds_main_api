@@ -15,11 +15,27 @@ logger = logging.getLogger(__name__)
 # camera_id(int) → {"thread": Thread, "pipeline": ExportFinalPipeline, "latest_result": str}
 _pipelines: dict[int, dict] = {}
 _pipelines_lock = threading.Lock()
+_pipeline_generations: dict[int, int] = {}
+_stopped_generations: dict[int, int] = {}
 
 # FastAPI 이벤트 루프 및 WebSocket 브로드캐스트 함수 (main.py lifespan에서 주입)
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _broadcast_fn: Optional[Callable] = None
 _db_handler = None
+
+_PUSH_EXTRA_RESERVED_KEYS = {
+    "camera_id",
+    "camera_sen_id",
+    "event_id",
+    "event_type",
+    "type",
+    "push",
+    "notification_type",
+    "title",
+    "body",
+    "text",
+    "result",
+}
 
 
 def init_manager(loop: asyncio.AbstractEventLoop, broadcast_fn: Callable, db_handler=None) -> None:
@@ -60,30 +76,91 @@ def _save_alert_event(camera_id: int, answer: str, metadata: dict) -> int | None
         return None
 
 
-def _make_on_result(camera_id: int, metadata: dict | None = None) -> Callable[[str], None]:
+def _push_extra(metadata: dict) -> dict:
+    """make_vlm_push_payload의 명시 키와 충돌할 수 있는 메타데이터를 제거한다."""
+    extra = dict(metadata or {})
+    for key in _PUSH_EXTRA_RESERVED_KEYS:
+        extra.pop(key, None)
+    return extra
+
+
+async def _broadcast_payload(payload: dict, *, camera_id: int, event_id: int | None) -> None:
+    if _broadcast_fn is None:
+        return
+
+    try:
+        await _broadcast_fn(payload)
+        logger.info("[WS] fire_pipeline broadcast success event_id=%s camera_id=%s", event_id, camera_id)
+    except Exception:
+        logger.exception("[WS] fire_pipeline broadcast failed event_id=%s camera_id=%s", event_id, camera_id)
+
+
+def _make_on_result(camera_id: int, metadata: dict | None = None, generation: int = 0) -> Callable[[str], None]:
     """파이프라인 결과를 메모리에 저장하고 WebSocket으로 전송하는 콜백 생성."""
     metadata = dict(metadata or {})
 
-    def on_result(answer: str) -> None:
+    def on_result(answer: str, request_number: int | None = None) -> None:
+        # stop/delete 이후 늦게 도착한 VLM 결과는 과거 이벤트이므로 DB 저장과 push를 모두 하지 않는다.
+        with _pipelines_lock:
+            entry = _pipelines.get(camera_id)
+            stopped_generation = _stopped_generations.get(camera_id, 0)
+            pipeline = entry.get("pipeline") if entry is not None else None
+            is_stale = (
+                entry is None
+                or entry.get("generation") != generation
+                or generation <= stopped_generation
+                or (pipeline is not None and not getattr(pipeline, "running", True))
+            )
+
+        if is_stale:
+            logger.info(
+                "[FirePipeline] dropped stale VLM result camera_id=%s request=%s reason=pipeline_stopped",
+                camera_id,
+                request_number if request_number is not None else "-",
+            )
+            return
+
         event_id = _save_alert_event(camera_id, answer, metadata)
 
         with _pipelines_lock:
             entry = _pipelines.get(camera_id)
-            if entry is not None:
-                entry["latest_result"] = answer
-                entry["latest_event_id"] = event_id
+            if (
+                entry is None
+                or entry.get("generation") != generation
+                or generation <= _stopped_generations.get(camera_id, 0)
+            ):
+                logger.info(
+                    "[FirePipeline] dropped stale VLM result camera_id=%s request=%s reason=pipeline_stopped",
+                    camera_id,
+                    request_number if request_number is not None else "-",
+                )
+                return
+            entry["latest_result"] = answer
+            entry["latest_event_id"] = event_id
 
         if _loop is not None and _broadcast_fn is not None:
-            asyncio.run_coroutine_threadsafe(
-                _broadcast_fn(make_vlm_push_payload(
-                    "fire_pipeline",
-                    "CCTV 화재/연기 autoregressive VLM 분석 완료",
-                    answer,
-                    event_id=event_id,
-                    camera_id=camera_id,
-                    **metadata,
-                )),
-                _loop,
+            extra = _push_extra(metadata)
+            payload = make_vlm_push_payload(
+                "fire_pipeline",
+                "CCTV 화재/연기 autoregressive VLM 분석 완료",
+                answer,
+                event_id=event_id,
+                camera_id=camera_id,
+                camera_sen_id=metadata.get("sen_id") or camera_id,
+                **extra,
+            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _broadcast_payload(payload, camera_id=camera_id, event_id=event_id),
+                    _loop,
+                )
+            except Exception:
+                logger.exception("[WS] fire_pipeline broadcast schedule failed event_id=%s camera_id=%s", event_id, camera_id)
+        else:
+            logger.info(
+                "[WS] fire_pipeline broadcast skipped event_id=%s camera_id=%s reason=no_loop_or_broadcast_fn",
+                event_id,
+                camera_id,
             )
 
     return on_result
@@ -131,6 +208,8 @@ def start_pipeline(
                 current.get("latest_error", ""),
             )
             _pipelines.pop(camera_id, None)
+        generation = _pipeline_generations.get(camera_id, 0) + 1
+        _pipeline_generations[camera_id] = generation
         _pipelines[camera_id] = {
             "thread": None,
             "pipeline": None,
@@ -138,6 +217,7 @@ def start_pipeline(
             "latest_error": "",
             "latest_event_id": None,
             "starting": True,
+            "generation": generation,
             "metadata": dict(metadata or {}),
         }
 
@@ -153,7 +233,7 @@ def start_pipeline(
     try:
         config = FirePipelineConfig(rtsp_url=rtsp_url, model_path=model_path)
         config.camera_id = camera_id
-        on_result = _make_on_result(camera_id, metadata)
+        on_result = _make_on_result(camera_id, metadata, generation)
         pipeline = ExportFinalPipeline(config, on_result=on_result)
 
         thread = threading.Thread(
@@ -177,6 +257,7 @@ def start_pipeline(
             "latest_error": "",
             "latest_event_id": None,
             "starting": False,
+            "generation": generation,
             "metadata": dict(metadata or {}),
         }
     logger.info("FirePipeline started camera_id=%s source=%s", camera_id, rtsp_url)
@@ -193,6 +274,11 @@ def stop_pipeline(camera_id: int) -> bool:
         entry = _pipelines.pop(camera_id, None)
     if entry is None:
         return False
+    with _pipelines_lock:
+        _stopped_generations[camera_id] = max(
+            _stopped_generations.get(camera_id, 0),
+            int(entry.get("generation") or _pipeline_generations.get(camera_id, 0)),
+        )
 
     pipeline = entry["pipeline"]
     if pipeline is not None:
