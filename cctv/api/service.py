@@ -73,6 +73,16 @@ def start_registered_camera_runtime_components(
     cameras = []
 
     for row in rows:
+        # 시연용 CCTV는 실제 RTSP 연결이 없으므로 runtime 시작 생략
+        if row.get("is_demo"):
+            cameras.append({
+                "sensor_id": row.get("sensor_id"),
+                "sen_id": row.get("sen_id"),
+                "camera_id": row.get("sen_id"),
+                "status": "skipped_demo",
+            })
+            continue
+
         try:
             rtsp_url = _row_to_rtsp_url(row)
             _start_runtime_components(
@@ -787,7 +797,9 @@ def _row_to_rtsp_url(row: dict, rtsp_path: str | None = None) -> str:
 
 
 def _row_to_camera_out(row: dict) -> dict:
-    rtsp_url = row.get("rtsp_url") or _row_to_rtsp_url(row)
+    is_demo = bool(row.get("is_demo"))
+    # demo CCTV는 실제 RTSP URL이 없으므로 빌드하지 않음
+    rtsp_url = row.get("rtsp_url") or ("" if is_demo else _row_to_rtsp_url(row))
     registered_at = _serialize_datetime(row.get("registered_at") or row.get("created_at"))
     is_online = bool(row.get("is_online"))
 
@@ -804,6 +816,8 @@ def _row_to_camera_out(row: dict) -> dict:
         "is_hazard": bool(row.get("is_hazard")),
         "is_active": is_online,
         "is_online": is_online,
+        "is_demo": is_demo,
+        "demo_video_key": row.get("demo_video_key"),
         "registered_at": registered_at,
         "camera": {
             "rtsp_url": rtsp_url,

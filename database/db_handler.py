@@ -1444,7 +1444,7 @@ class DatabaseHandler:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     params = []
-                    where_sql = "WHERE s.sensor_type IN ('camera', 'cctv')"
+                    where_sql = "WHERE s.sensor_type IN ('camera', 'cctv', 'demo_camera')"
                     if space_id is not None:
                         where_sql += " AND COALESCE(c.space_id, s.space_id) = %s"
                         params.append(space_id)
@@ -1457,7 +1457,10 @@ class DatabaseHandler:
                             c.camera_id,
                             c.camera_pw,
                             c.health,
+                            c.is_demo,
+                            c.demo_video_key,
                             s.sensor_id,
+                            s.sensor_type,
                             s.sen_name,
                             s.sen_locate,
                             s.is_online,
