@@ -638,9 +638,9 @@ def register_demo_camera(
 ) -> dict:
     """시연용 가상 CCTV를 DB에 등록한다. 실제 네트워크 연결 검증 없이 즉시 등록."""
     jetson_id = data.jetson_id
+
+    # jetson_id 미전달 시 DB의 첫 번째 Jetson 사용
     if jetson_id is None:
-        # jetson_id 미전달 시 DB의 첫 번째 Jetson 사용
-        import pymysql
         try:
             with db._get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -648,8 +648,8 @@ def register_demo_camera(
                     row = cursor.fetchone()
                     if row:
                         jetson_id = int(row["jetson_id"])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("jetson_id fallback 조회 실패: %s", e)
 
     if jetson_id is None:
         raise HTTPException(
@@ -657,24 +657,25 @@ def register_demo_camera(
             detail="Jetson 정보를 찾을 수 없습니다. jetson_id를 직접 전달하거나 Jetson을 먼저 등록하세요.",
         )
 
-    row = db.register_demo_camera(
+    result = db.register_demo_camera(
         space_id=data.space_id,
         jetson_id=jetson_id,
         name=data.name,
         demo_video_key=data.demo_video_key,
     )
 
-    if not row:
+    if not result:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="시연용 CCTV 등록에 실패했습니다.",
+            detail="시연용 CCTV 등록에 실패했습니다. 서버 로그를 확인하세요.",
         )
 
     logger.info(
         "Demo CCTV registered space_id=%s jetson_id=%s demo_video_key=%s sen_id=%s",
-        data.space_id, jetson_id, data.demo_video_key, row.get("sen_id"),
+        data.space_id, jetson_id, data.demo_video_key, result.get("sen_id"),
     )
-    return row
+    # datetime 없는 단순 dict만 반환 (serialization 안전)
+    return result
 
 
 def analyze_demo_camera(

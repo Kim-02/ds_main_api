@@ -2353,34 +2353,43 @@ class DatabaseHandler:
     ) -> dict | None:
         """시연용 가상 CCTV를 sensor + camera_info에 등록한다.
 
-        같은 space_id + demo_video_key 조합이 이미 있으면 기존 항목을 반환한다.
+        같은 sensor_id가 이미 있으면 기존 sen_id를 반환한다.
+        커넥션 중첩/트랜잭션 문제를 방지하기 위해 모든 작업을 단일 커넥션 블록 안에서 처리하고
+        get_cctv_by_sen_id를 호출하지 않는다.
         """
         sensor_id = f"demo-camera-{demo_video_key}-space-{space_id}"
-        ip_address = "vr"
 
         try:
             with self._get_connection() as conn:
-                try:
-                    with conn.cursor() as cursor:
-                        conn.begin()
+                with conn.cursor() as cursor:
+                    # ── 1. 중복 확인 (트랜잭션 전) ────────────────────────────
+                    cursor.execute(
+                        "SELECT sen_id FROM sensor WHERE sensor_id = %s LIMIT 1",
+                        (sensor_id,),
+                    )
+                    existing = cursor.fetchone()
+                    if existing:
+                        # 이미 존재 → 트랜잭션 없이 바로 반환
+                        return {
+                            "sen_id": int(existing["sen_id"]),
+                            "sensor_id": sensor_id,
+                            "sen_name": name,
+                            "space_id": space_id,
+                            "is_demo": True,
+                            "demo_video_key": demo_video_key,
+                        }
 
-                        # 중복 확인
-                        cursor.execute(
-                            "SELECT sen_id FROM sensor WHERE sensor_id = %s LIMIT 1",
-                            (sensor_id,),
-                        )
-                        existing = cursor.fetchone()
-                        if existing:
-                            return self.get_cctv_by_sen_id(existing["sen_id"])
+                    # ── 2. jetson 위치 정보 조회 ───────────────────────────────
+                    cursor.execute(
+                        "SELECT jetson_loc FROM jetson WHERE jetson_id = %s LIMIT 1",
+                        (jetson_id,),
+                    )
+                    jetson = cursor.fetchone()
+                    sen_locate = (jetson["jetson_loc"] if jetson else None) or "시연용"
 
-                        # jetson 위치 정보 조회
-                        cursor.execute(
-                            "SELECT jetson_loc, space_id FROM jetson WHERE jetson_id = %s LIMIT 1",
-                            (jetson_id,),
-                        )
-                        jetson = cursor.fetchone()
-                        sen_locate = (jetson["jetson_loc"] if jetson else None) or "시연용"
-
+                    # ── 3. 트랜잭션: sensor + camera_info INSERT ───────────────
+                    conn.begin()
+                    try:
                         cursor.execute(
                             """
                             INSERT INTO sensor (
@@ -2407,19 +2416,26 @@ class DatabaseHandler:
                                 sen_id, ip_address, camera_id, camera_pw,
                                 health, space_id, is_demo, demo_video_key
                             ) VALUES (
-                                %s, %s, %s, %s,
+                                %s, 'vr', 'vr', 'vr',
                                 1, %s, 1, %s
                             )
                             """,
-                            (new_sen_id, ip_address, "vr", "vr", space_id, demo_video_key),
+                            (new_sen_id, space_id, demo_video_key),
                         )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
 
-                    conn.commit()
-                    return self.get_cctv_by_sen_id(new_sen_id)
-
-                except Exception:
-                    conn.rollback()
-                    raise
+                # ── 4. 커넥션 완전히 닫힌 후 단순 dict 반환 ──────────────────
+                return {
+                    "sen_id": int(new_sen_id),
+                    "sensor_id": sensor_id,
+                    "sen_name": name,
+                    "space_id": space_id,
+                    "is_demo": True,
+                    "demo_video_key": demo_video_key,
+                }
 
         except Exception as e:
             logging.error("register_demo_camera 오류: %s", e)

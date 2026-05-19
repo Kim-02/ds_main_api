@@ -255,12 +255,19 @@ def register_demo_camera(
     data: DemoCctvRegisterReq,
     request: Request,
 ):
-    row = service.register_demo_camera(request.app.state.db, data)
-    return {
-        "success": True,
-        "message": "시연용 CCTV가 등록되었습니다.",
-        "data": row,
-    }
+    result = service.register_demo_camera(request.app.state.db, data)
+    return DemoCctvRegisterResponse(
+        success=True,
+        message="시연용 CCTV가 등록되었습니다.",
+        data={
+            "sen_id": result.get("sen_id"),
+            "sensor_id": result.get("sensor_id") or "",
+            "sen_name": result.get("sen_name") or "",
+            "space_id": result.get("space_id"),
+            "is_demo": bool(result.get("is_demo")),
+            "demo_video_key": result.get("demo_video_key") or "",
+        },
+    )
 
 
 @router.post(
