@@ -2365,7 +2365,8 @@ class DatabaseHandler:
                                 row["latest_measured_at"] = val.isoformat()
 
                         row["is_demo"] = bool(row.get("is_demo", 0))
-
+                        row["is_online"] = bool(row.get("is_online", 0))
+                        
                         sensor_type = str(row.get("sensor_type") or "").lower()
                         is_camera = (
                             row["is_demo"]
