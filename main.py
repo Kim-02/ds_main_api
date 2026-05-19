@@ -365,7 +365,7 @@ async def lifespan(app: FastAPI):
     fire_manager = None
     try:
         from cctv.fire_pipeline import manager as fire_manager_mod
-        fire_manager_mod.init_manager(main_loop, ws_manager.broadcast)
+        fire_manager_mod.init_manager(main_loop, ws_manager.broadcast, db)
         fire_manager = fire_manager_mod
         logger.info("Fire pipeline manager 초기화 완료")
     except ImportError as e:

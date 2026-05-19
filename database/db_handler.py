@@ -1657,7 +1657,7 @@ class DatabaseHandler:
                             """
                             DELETE FROM sensor
                             WHERE sen_id = %s
-                              AND sensor_type IN ('camera', 'cctv')
+                              AND sensor_type IN ('camera', 'cctv', 'demo_camera')
                             """,
                             (sen_id,),
                         )
@@ -2580,6 +2580,41 @@ class DatabaseHandler:
                         conn.begin()
 
                         # ── 1. 중복 확인 ──────────────────────────────────────
+                        # demo CCTV의 의미상 중복 기준은 sensor_id 문자열보다
+                        # 같은 space_id + demo_video_key + is_demo 조합이다.
+                        cursor.execute(
+                            """
+                            SELECT
+                                s.sen_id,
+                                s.sensor_id,
+                                s.sen_name,
+                                COALESCE(c.space_id, s.space_id) AS space_id,
+                                c.demo_video_key
+                            FROM camera_info c
+                            JOIN sensor s
+                              ON c.sen_id = s.sen_id
+                            WHERE c.is_demo = 1
+                              AND c.demo_video_key = %s
+                              AND COALESCE(c.space_id, s.space_id) = %s
+                              AND s.sensor_type = 'demo_camera'
+                            ORDER BY s.sen_id DESC
+                            LIMIT 1
+                            """,
+                            (demo_video_key, space_id),
+                        )
+                        existing_demo = cursor.fetchone()
+                        if existing_demo:
+                            conn.rollback()
+                            return {
+                                "sen_id": int(existing_demo["sen_id"]),
+                                "sensor_id": existing_demo.get("sensor_id") or sensor_id,
+                                "sen_name": existing_demo.get("sen_name") or name,
+                                "space_id": int(existing_demo.get("space_id") or space_id),
+                                "is_demo": True,
+                                "demo_video_key": existing_demo.get("demo_video_key") or demo_video_key,
+                                "reused": True,
+                            }
+
                         cursor.execute(
                             "SELECT sen_id FROM sensor WHERE sensor_id = %s LIMIT 1",
                             (sensor_id,),
@@ -2596,6 +2631,7 @@ class DatabaseHandler:
                                 "space_id": space_id,
                                 "is_demo": True,
                                 "demo_video_key": demo_video_key,
+                                "reused": True,
                             }
 
                         # ── 2. jetson 위치 정보 조회 ──────────────────────────
@@ -2651,6 +2687,7 @@ class DatabaseHandler:
                         "space_id": space_id,
                         "is_demo": True,
                         "demo_video_key": demo_video_key,
+                        "reused": False,
                     }
 
                 except Exception:

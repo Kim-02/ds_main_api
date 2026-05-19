@@ -71,19 +71,55 @@ def start_registered_camera_runtime_components(
     started = 0
     failed = 0
     cameras = []
+    latest_demo_by_key: dict[tuple[int, str], dict] = {}
+
+    for row in rows:
+        if not row.get("is_demo"):
+            continue
+        demo_key = _demo_runtime_key(row)
+        current = latest_demo_by_key.get(demo_key)
+        if current is None or int(row.get("sen_id") or 0) > int(current.get("sen_id") or 0):
+            latest_demo_by_key[demo_key] = row
 
     for row in rows:
         if row.get("is_demo"):
-            # 시연용 CCTV는 RTSP 없이 video 파일로 fire pipeline만 시작
+            # 시연용 CCTV는 RTSP 대신 로컬 video 파일로 reader/buffer/fire pipeline을 복구
             demo_video_key = row.get("demo_video_key") or "scenario3_fire"
+            demo_key = _demo_runtime_key(row)
+            latest_demo = latest_demo_by_key.get(demo_key)
+            if latest_demo is not None and int(latest_demo.get("sen_id") or 0) != int(row.get("sen_id") or 0):
+                _stop_runtime_components(int(row["sen_id"]))
+                cameras.append({
+                    "sensor_id": row.get("sensor_id"),
+                    "sen_id": row.get("sen_id"),
+                    "camera_id": row.get("sen_id"),
+                    "status": "skipped_duplicate_demo",
+                })
+                logger.info(
+                    "Existing duplicate demo runtime stopped camera_id=%s keep_camera_id=%s key=%s",
+                    row.get("sen_id"),
+                    latest_demo.get("sen_id"),
+                    demo_key,
+                )
+                continue
+
             relative_path = DEMO_VIDEO_MAP.get(demo_video_key)
             video_path = (Path.cwd() / relative_path).resolve() if relative_path else None
             if video_path and video_path.exists():
                 try:
-                    from cctv.fire_pipeline import manager as fire_manager
-                    fire_manager.start_pipeline(
-                        camera_id=int(row["sen_id"]),
+                    _stop_stale_demo_runtimes(
+                        db,
+                        int(row.get("space_id") or 0),
+                        demo_video_key,
+                        video_path,
+                        keep_camera_id=int(row["sen_id"]),
+                    )
+                    _start_runtime_components(
+                        cam_id=int(row["sen_id"]),
                         rtsp_url=str(video_path),
+                        process_id=int(row.get("space_id") or 0),
+                        camera_meta=_demo_camera_meta(row, video_path),
+                        force_fire_pipeline=True,
                     )
                     started += 1
                     status_str = "started_demo"
@@ -166,6 +202,7 @@ def start_video_pipeline_from_file(data: VideoPipelineStartReq) -> dict:
         rtsp_url=str(video_path),
         process_id=space_id,
         camera_meta=camera_meta,
+        force_fire_pipeline=True,
     )
 
     logger.info(
@@ -254,6 +291,7 @@ def _start_runtime_components(
     rtsp_url: str,
     process_id: int,
     camera_meta: dict[str, Any] | None = None,
+    force_fire_pipeline: bool = False,
 ) -> None:
     """카메라 등록/복구 후 RTSP reader, 10초 버퍼, fire pipeline을 시작한다."""
     try:
@@ -271,6 +309,12 @@ def _start_runtime_components(
             buffer_seconds=settings.frame_buffer_seconds,
             sample_interval=settings.frame_buffer_sample_interval_seconds,
         )
+        logger.info(
+            "CCTV runtime reader/buffer ready cam_id=%s process_id=%s source=%s",
+            cam_id,
+            process_id,
+            rtsp_url,
+        )
     except Exception:
         logger.warning(
             "RTSP reader/buffer 시작 실패 (cam_id=%s, rtsp=%s) — DB 등록은 유지됩니다.",
@@ -278,14 +322,23 @@ def _start_runtime_components(
             rtsp_url,
         )
 
-    if settings.fire_pipeline_enabled:
+    fire_enabled = bool(settings.fire_pipeline_enabled) or bool(force_fire_pipeline)
+    if fire_enabled:
         try:
             from cctv.fire_pipeline import manager as fire_manager
-            fire_manager.start_pipeline(cam_id, rtsp_url, metadata=camera_meta)
+            started = fire_manager.start_pipeline(cam_id, rtsp_url, metadata=camera_meta)
+            if not started:
+                logger.info("FirePipeline already active or not started cam_id=%s source=%s", cam_id, rtsp_url)
         except ImportError:
             logger.warning("fire_pipeline 모듈 없음 — 파이프라인 건너뜀 (cam_id=%s)", cam_id)
         except Exception:
             logger.warning("fire pipeline 시작 실패 (cam_id=%s) — DB 등록은 유지됩니다.", cam_id)
+    else:
+        logger.info(
+            "FirePipeline skipped cam_id=%s reason=fire_pipeline_enabled_false source=%s",
+            cam_id,
+            rtsp_url,
+        )
 
 
 def _stop_runtime_components(cam_id: int) -> None:
@@ -507,6 +560,33 @@ def start_fire_pipeline(
             detail="Camera not found",
         )
 
+    if row.get("is_demo"):
+        demo_video_key = row.get("demo_video_key") or "scenario3_fire"
+        relative_path = DEMO_VIDEO_MAP.get(demo_video_key)
+        if not relative_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"demo_video_key='{demo_video_key}'에 대응하는 영상 경로가 없습니다.",
+            )
+        video_path = (Path.cwd() / relative_path).resolve()
+        if not video_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"서버 demo 영상 파일이 없습니다: {relative_path}",
+            )
+        _start_runtime_components(
+            cam_id=int(sensor_id),
+            rtsp_url=str(video_path),
+            process_id=int(row.get("space_id") or 0),
+            camera_meta=_demo_camera_meta(row, video_path),
+            force_fire_pipeline=True,
+        )
+        return {
+            "status": "started",
+            "sensor_id": sensor_id,
+            "camera_id": sensor_id,
+        }
+
     try:
         from cctv.fire_pipeline import manager as fire_manager
     except ImportError:
@@ -688,8 +768,10 @@ def register_demo_camera(
         )
 
     sen_id = result.get("sen_id")
+    reused = bool(result.get("reused"))
     logger.info(
-        "Demo CCTV registered space_id=%s jetson_id=%s demo_video_key=%s sen_id=%s",
+        "Demo CCTV %s space_id=%s jetson_id=%s demo_video_key=%s sen_id=%s",
+        "reused" if reused else "registered",
         data.space_id, jetson_id, data.demo_video_key, sen_id,
     )
 
@@ -699,14 +781,23 @@ def register_demo_camera(
         video_path = (Path.cwd() / relative_path).resolve()
         if video_path.exists():
             try:
-                from cctv.fire_pipeline import manager as fire_manager
-                fire_manager.start_pipeline(
-                    camera_id=int(sen_id),
-                    rtsp_url=str(video_path),
+                _stop_stale_demo_runtimes(
+                    db,
+                    int(data.space_id),
+                    data.demo_video_key,
+                    video_path,
+                    keep_camera_id=int(sen_id),
                 )
-                logger.info("Demo CCTV fire pipeline started sen_id=%s video=%s", sen_id, video_path)
+                _start_runtime_components(
+                    cam_id=int(sen_id),
+                    rtsp_url=str(video_path),
+                    process_id=int(data.space_id),
+                    camera_meta=_demo_camera_meta(result, video_path),
+                    force_fire_pipeline=True,
+                )
+                logger.info("Demo CCTV runtime started sen_id=%s video=%s", sen_id, video_path)
             except Exception as exc:
-                logger.warning("Demo CCTV fire pipeline 시작 실패 sen_id=%s: %s", sen_id, exc)
+                logger.warning("Demo CCTV runtime 시작 실패 sen_id=%s: %s", sen_id, exc)
         else:
             logger.warning(
                 "Demo CCTV 영상 파일 없음 — fire pipeline 미시작 sen_id=%s path=%s",
@@ -769,12 +860,20 @@ def analyze_demo_camera(
     import uuid
     scenario_id = str(uuid.uuid4())
 
-    ok = fire_manager.start_pipeline(
-        camera_id=camera_sen_id,
-        rtsp_url=str(video_path),
+    _stop_stale_demo_runtimes(
+        db,
+        int(row.get("space_id") or 0),
+        demo_video_key,
+        video_path,
+        keep_camera_id=int(camera_sen_id),
     )
-    if not ok:
-        logger.warning("Demo analyze pipeline already running camera_sen_id=%s", camera_sen_id)
+    _start_runtime_components(
+        cam_id=int(camera_sen_id),
+        rtsp_url=str(video_path),
+        process_id=int(row.get("space_id") or 0),
+        camera_meta=_demo_camera_meta(row, video_path),
+        force_fire_pipeline=True,
+    )
 
     logger.info(
         "Demo VLM analysis started camera_sen_id=%s video_path=%s scenario_id=%s",
@@ -864,6 +963,117 @@ def _row_to_camera_out(row: dict) -> dict:
             "camera_id": row.get("camera_id"),
             "health": bool(row.get("health")),
         },
+    }
+
+
+def _demo_runtime_key(row: dict) -> tuple[int, str]:
+    return (
+        int(row.get("space_id") or 0),
+        str(row.get("demo_video_key") or "scenario3_fire"),
+    )
+
+
+def _stop_stale_demo_runtimes(
+    db: DatabaseHandler,
+    space_id: int,
+    demo_video_key: str,
+    video_path: Path,
+    *,
+    keep_camera_id: int,
+) -> None:
+    """같은 demo video/source를 물고 있는 이전 reader/buffer/fire runtime을 정리한다."""
+    stopped: set[int] = set()
+    db_rows: list[dict] = []
+    all_db_camera_ids: set[int] = set()
+    same_demo_camera_ids: set[int] = set()
+
+    try:
+        db_rows = db.get_cctv_list()
+        for row in db_rows:
+            camera_id = int(row.get("sen_id") or 0)
+            if camera_id <= 0:
+                continue
+            all_db_camera_ids.add(camera_id)
+            if not row.get("is_demo"):
+                continue
+            if int(row.get("space_id") or 0) != int(space_id):
+                continue
+            if str(row.get("demo_video_key") or "scenario3_fire") != str(demo_video_key):
+                continue
+            same_demo_camera_ids.add(camera_id)
+    except Exception as exc:
+        logger.warning("기존 demo DB 목록 조회 실패 keep_camera_id=%s: %s", keep_camera_id, exc)
+
+    try:
+        from cctv.rtsp import get_reader_sources
+
+        for camera_id, source in get_reader_sources().items():
+            if int(camera_id) == int(keep_camera_id):
+                continue
+            if int(camera_id) in all_db_camera_ids and int(camera_id) not in same_demo_camera_ids:
+                continue
+            if _same_local_source(source, video_path):
+                _stop_runtime_components(int(camera_id))
+                stopped.add(int(camera_id))
+                logger.info(
+                    "Existing demo runtime stopped camera_id=%s keep_camera_id=%s video=%s",
+                    camera_id,
+                    keep_camera_id,
+                    video_path,
+                )
+    except Exception as exc:
+        logger.warning("기존 demo reader source 정리 실패 keep_camera_id=%s: %s", keep_camera_id, exc)
+
+    try:
+        for row in db_rows or db.get_cctv_list(space_id=space_id):
+            if not row.get("is_demo"):
+                continue
+            if int(row.get("space_id") or 0) != int(space_id):
+                continue
+            camera_id = int(row.get("sen_id") or 0)
+            if camera_id == int(keep_camera_id) or camera_id in stopped:
+                continue
+            if str(row.get("demo_video_key") or "scenario3_fire") != str(demo_video_key):
+                continue
+            _stop_runtime_components(camera_id)
+            stopped.add(camera_id)
+            logger.info(
+                "Existing duplicate demo runtime stopped camera_id=%s keep_camera_id=%s key=(%s,%s)",
+                camera_id,
+                keep_camera_id,
+                space_id,
+                demo_video_key,
+            )
+    except Exception as exc:
+        logger.warning("기존 demo DB runtime 정리 실패 keep_camera_id=%s: %s", keep_camera_id, exc)
+
+
+def _same_local_source(source: str, video_path: Path) -> bool:
+    try:
+        return Path(str(source)).resolve() == video_path.resolve()
+    except Exception:
+        return str(source) == str(video_path)
+
+
+def _demo_camera_meta(row: dict, video_path: Path) -> dict[str, Any]:
+    """Fire/VLM 알림에 실을 demo CCTV 메타데이터를 만든다."""
+    space_id = row.get("space_id")
+    return {
+        "sen_id": int(row.get("sen_id") or row.get("id") or 0),
+        "sensor_id": row.get("sensor_id"),
+        "sen_name": row.get("sen_name") or row.get("name") or f"DEMO-{video_path.stem}",
+        "space_id": int(space_id) if space_id is not None else None,
+        "space_name": row.get("space_name"),
+        "hazard_type": row.get("hazard_type"),
+        "is_hazard": bool(row.get("is_hazard", False)),
+        "is_demo": True,
+        "demo_video_key": row.get("demo_video_key"),
+        "ip_address": "vr",
+        "camera_id": "vr",
+        "camera_pw": "",
+        "rtsp_url": str(video_path),
+        "video_path": str(video_path),
+        "source_type": "demo_video_file",
     }
 
 

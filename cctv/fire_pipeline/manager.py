@@ -19,14 +19,45 @@ _pipelines_lock = threading.Lock()
 # FastAPI 이벤트 루프 및 WebSocket 브로드캐스트 함수 (main.py lifespan에서 주입)
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _broadcast_fn: Optional[Callable] = None
+_db_handler = None
 
 
-def init_manager(loop: asyncio.AbstractEventLoop, broadcast_fn: Callable) -> None:
+def init_manager(loop: asyncio.AbstractEventLoop, broadcast_fn: Callable, db_handler=None) -> None:
     """main.py lifespan에서 호출 — WebSocket 브로드캐스트 함수와 이벤트 루프를 주입."""
-    global _loop, _broadcast_fn
+    global _loop, _broadcast_fn, _db_handler
     _loop = loop
     _broadcast_fn = broadcast_fn
-    logger.info("FirePipelineManager 초기화 완료")
+    _db_handler = db_handler
+    logger.info("FirePipelineManager 초기화 완료 db_persistence=%s", bool(db_handler))
+
+
+def _save_alert_event(camera_id: int, answer: str, metadata: dict) -> int | None:
+    if _db_handler is None:
+        return None
+
+    try:
+        level = "danger" if any(word in str(answer) for word in ("화재", "연기", "대피", "위험")) else "warning"
+        event_id = _db_handler.save_vlm_alert_event(
+            space_id=metadata.get("space_id"),
+            jetson_id=metadata.get("jetson_id"),
+            camera_sen_id=metadata.get("sen_id") or camera_id,
+            sensor_id=metadata.get("sensor_id"),
+            title="CCTV 화재/연기 autoregressive VLM 분석",
+            message=str(answer or ""),
+            level=level,
+            source="fire_pipeline",
+            event_type="fire_pipeline",
+        )
+        logger.info(
+            "[VLM_ALERT] fire_pipeline saved event_id=%s camera_id=%s space_id=%s",
+            event_id,
+            camera_id,
+            metadata.get("space_id"),
+        )
+        return event_id
+    except Exception as exc:
+        logger.exception("[VLM_ALERT] fire_pipeline save failed camera_id=%s: %s", camera_id, exc)
+        return None
 
 
 def _make_on_result(camera_id: int, metadata: dict | None = None) -> Callable[[str], None]:
@@ -34,10 +65,13 @@ def _make_on_result(camera_id: int, metadata: dict | None = None) -> Callable[[s
     metadata = dict(metadata or {})
 
     def on_result(answer: str) -> None:
+        event_id = _save_alert_event(camera_id, answer, metadata)
+
         with _pipelines_lock:
             entry = _pipelines.get(camera_id)
             if entry is not None:
                 entry["latest_result"] = answer
+                entry["latest_event_id"] = event_id
 
         if _loop is not None and _broadcast_fn is not None:
             asyncio.run_coroutine_threadsafe(
@@ -45,6 +79,7 @@ def _make_on_result(camera_id: int, metadata: dict | None = None) -> Callable[[s
                     "fire_pipeline",
                     "CCTV 화재/연기 autoregressive VLM 분석 완료",
                     answer,
+                    event_id=event_id,
                     camera_id=camera_id,
                     **metadata,
                 )),
@@ -78,14 +113,30 @@ def start_pipeline(
     model_path: 화재 감지 YOLO 모델 경로 (비어 있으면 config 기본값 사용)
     """
     with _pipelines_lock:
-        if camera_id in _pipelines:
-            logger.warning("Fire pipeline already running for camera %s", camera_id)
-            return False
+        current = _pipelines.get(camera_id)
+        if current is not None:
+            thread = current.get("thread")
+            starting = bool(current.get("starting"))
+            if starting or (thread is not None and thread.is_alive()):
+                logger.warning(
+                    "Fire pipeline already running for camera %s status={running:%s, starting:%s}",
+                    camera_id,
+                    bool(thread and thread.is_alive()),
+                    starting,
+                )
+                return False
+            logger.warning(
+                "Fire pipeline stale entry removed for camera %s latest_error=%s",
+                camera_id,
+                current.get("latest_error", ""),
+            )
+            _pipelines.pop(camera_id, None)
         _pipelines[camera_id] = {
             "thread": None,
             "pipeline": None,
             "latest_result": "",
             "latest_error": "",
+            "latest_event_id": None,
             "starting": True,
             "metadata": dict(metadata or {}),
         }
@@ -124,10 +175,11 @@ def start_pipeline(
             "pipeline": pipeline,
             "latest_result": "",
             "latest_error": "",
+            "latest_event_id": None,
             "starting": False,
             "metadata": dict(metadata or {}),
         }
-    logger.info("Fire pipeline started for camera %s (rtsp=%s)", camera_id, rtsp_url)
+    logger.info("FirePipeline started camera_id=%s source=%s", camera_id, rtsp_url)
     return True
 
 
@@ -161,6 +213,7 @@ def get_status(camera_id: int) -> dict:
         "starting": bool(entry.get("starting")),
         "latest_result": entry["latest_result"],
         "latest_error": entry.get("latest_error", ""),
+        "latest_event_id": entry.get("latest_event_id"),
         "metadata": entry.get("metadata", {}),
     }
 

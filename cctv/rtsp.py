@@ -117,6 +117,7 @@ class RtspReader:
             return
 
         is_rtsp = str(self.rtsp_url).startswith("rtsp://")
+        is_file_source = (not is_rtsp) and os.path.isfile(str(self.rtsp_url))
         if is_rtsp:
             cap_url, username, password = _split_rtsp_credentials(self.rtsp_url)
         else:
@@ -156,6 +157,16 @@ class RtspReader:
                     ok, frame = cap.read()
 
                     if not ok:
+                        if is_file_source:
+                            # Demo/local video sources use the same reader registry as
+                            # RTSP cameras. Rewind on EOF so demos behave like live CCTV.
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            self._set_error("")
+                            logger.info("Video file EOF reached; looping camera_id=%s", self.camera_id)
+                            if frame_interval > 0:
+                                time.sleep(frame_interval)
+                            continue
+
                         self._set_error("rtsp_read_failed")
                         logger.warning("RTSP read failed camera_id=%s", self.camera_id)
                         break
@@ -265,6 +276,12 @@ def get_all_reader_ids() -> list[int]:
     """진단용: 현재 등록된 RTSP reader의 camera_id 목록을 반환."""
     with _readers_lock:
         return list(_readers.keys())
+
+
+def get_reader_sources() -> dict[int, str]:
+    """진단/정리용: 현재 reader가 물고 있는 source URL/path를 반환."""
+    with _readers_lock:
+        return {camera_id: reader.rtsp_url for camera_id, reader in _readers.items()}
 
 
 def stop_all_readers() -> None:
