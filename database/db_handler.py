@@ -2029,24 +2029,25 @@ class DatabaseHandler:
     # ------------------------------------------------------------------
 
     def get_floor_map_by_space_id(self, space_id: int) -> Optional[dict]:
-        """space_id 기준 가장 최근 평면도 1개 반환."""
+        """space_id 기준 가장 최근 평면도 1개 반환.
+
+        floor_map.space_id 가 NULL 인 레코드도 jetson.space_id 를 통해 fallback 조회하며,
+        발견 시 floor_map.space_id 를 해당 space_id 로 자동 업데이트한다.
+        """
+        SELECT_COLS = """
+            fm.map_id, fm.jetson_id, fm.space_id,
+            sp.space_name,
+            fm.map_name, fm.image_base64, fm.image_mime_type,
+            fm.image_width, fm.image_height,
+            fm.created_at, fm.updated_at
+        """
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
+                    # ── 1차: space_id 직접 조회 ────────────────────────────
                     cursor.execute(
-                        """
-                        SELECT
-                            fm.map_id,
-                            fm.jetson_id,
-                            fm.space_id,
-                            sp.space_name,
-                            fm.map_name,
-                            fm.image_base64,
-                            fm.image_mime_type,
-                            fm.image_width,
-                            fm.image_height,
-                            fm.created_at,
-                            fm.updated_at
+                        f"""
+                        SELECT {SELECT_COLS}
                         FROM floor_map fm
                         LEFT JOIN ds_space sp ON fm.space_id = sp.space_id
                         WHERE fm.space_id = %s
@@ -2055,7 +2056,72 @@ class DatabaseHandler:
                         """,
                         (space_id,),
                     )
-                    return cursor.fetchone()
+                    row = cursor.fetchone()
+                    if row:
+                        logging.info("[MAP] floor_map found directly space_id=%s map_id=%s", space_id, row.get("map_id"))
+                        return row
+
+                    # ── 2차 fallback: jetson.space_id 를 통해 조회 ────────
+                    # floor_map.space_id 가 NULL 이지만 jetson 이 해당 space 에 속한 경우
+                    logging.warning(
+                        "[MAP] floor_map not found by space_id=%s, trying jetson fallback", space_id
+                    )
+                    cursor.execute(
+                        f"""
+                        SELECT {SELECT_COLS}
+                        FROM floor_map fm
+                        JOIN jetson j ON j.jetson_id = fm.jetson_id
+                        LEFT JOIN ds_space sp ON j.space_id = sp.space_id
+                        WHERE j.space_id = %s
+                          AND (fm.space_id IS NULL OR fm.space_id != %s)
+                        ORDER BY fm.updated_at DESC
+                        LIMIT 1
+                        """,
+                        (space_id, space_id),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        logging.warning("[MAP] floor_map not found for space_id=%s (direct + fallback)", space_id)
+                        return None
+
+                    map_id = row.get("map_id")
+                    logging.warning(
+                        "[MAP] floor_map found via jetson fallback space_id=%s map_id=%s, auto-updating floor_map.space_id",
+                        space_id, map_id,
+                    )
+
+            # ── 3차: 커넥션 닫고 space_id 자동 업데이트 ──────────────────
+            try:
+                with self._get_connection() as conn2:
+                    with conn2.cursor() as cursor2:
+                        conn2.begin()
+                        cursor2.execute(
+                            "UPDATE floor_map SET space_id = %s WHERE map_id = %s AND space_id IS NULL",
+                            (space_id, map_id),
+                        )
+                    conn2.commit()
+                    logging.info("[MAP] floor_map.space_id updated map_id=%s space_id=%s", map_id, space_id)
+            except Exception as upd_e:
+                logging.warning("[MAP] floor_map.space_id 자동 업데이트 실패 map_id=%s: %s", map_id, upd_e)
+
+            # space_id, space_name 보정 후 반환
+            row = dict(row)
+            row["space_id"] = space_id
+            if not row.get("space_name"):
+                try:
+                    with self._get_connection() as conn3:
+                        with conn3.cursor() as cursor3:
+                            cursor3.execute(
+                                "SELECT space_name FROM ds_space WHERE space_id = %s LIMIT 1",
+                                (space_id,),
+                            )
+                            sp_row = cursor3.fetchone()
+                            if sp_row:
+                                row["space_name"] = sp_row["space_name"]
+                except Exception:
+                    pass
+            return row
+
         except Exception as e:
             logging.error("get_floor_map_by_space_id 오류: %s", e)
             return None
@@ -2085,11 +2151,40 @@ class DatabaseHandler:
                     map_space = map_row["space_id"]
                     sensor_space = sensor_row["space_id"]
 
-                    if map_space is None or sensor_space is None:
-                        return "평면도 또는 센서에 공간(space_id) 정보가 없습니다."
+                    # floor_map.space_id 가 NULL 이면 jetson 을 통해 보완
+                    if map_space is None:
+                        cursor.execute(
+                            """
+                            SELECT j.space_id
+                            FROM floor_map fm
+                            JOIN jetson j ON j.jetson_id = fm.jetson_id
+                            WHERE fm.map_id = %s LIMIT 1
+                            """,
+                            (map_id,),
+                        )
+                        j_row = cursor.fetchone()
+                        if j_row:
+                            map_space = j_row["space_id"]
+                            logging.info(
+                                "[MAP] validate_sensor_map_space: resolved NULL map_space via jetson map_id=%s space_id=%s",
+                                map_id, map_space,
+                            )
+
+                    if sensor_space is None:
+                        return "센서에 공간(space_id) 정보가 없습니다."
+
+                    if map_space is None:
+                        # floor_map에 공간 정보가 없으면 검증 통과 (배치 허용)
+                        logging.warning(
+                            "[MAP] validate_sensor_map_space: map_id=%s has no space_id, skipping validation",
+                            map_id,
+                        )
+                        return None
 
                     if map_space != sensor_space:
-                        return "센서와 평면도의 space_id가 일치하지 않습니다."
+                        return (
+                            f"센서(space_id={sensor_space})와 평면도(space_id={map_space})의 공간이 다릅니다."
+                        )
 
                     return None
         except Exception as e:
@@ -2284,9 +2379,20 @@ class DatabaseHandler:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
+                    # sensor_type 조건: camera/cctv/demo 계열 OR is_demo=1
+                    cctv_type_condition = (
+                        "("
+                        " LOWER(s.sensor_type) LIKE '%%camera%%'"
+                        " OR LOWER(s.sensor_type) LIKE '%%cctv%%'"
+                        " OR LOWER(s.sensor_type) LIKE '%%demo%%'"
+                        " OR c.is_demo = 1"
+                        ")"
+                    )
+                    space_condition = "COALESCE(c.space_id, s.space_id) = %s"
+
                     if map_id is not None:
                         cursor.execute(
-                            """
+                            f"""
                             SELECT
                                 s.sen_id,
                                 s.sensor_id,
@@ -2306,15 +2412,15 @@ class DatabaseHandler:
                             JOIN sensor s ON c.sen_id = s.sen_id
                             LEFT JOIN sensor_map_position p
                                 ON p.sensor_id = s.sensor_id AND p.map_id = %s
-                            WHERE COALESCE(c.space_id, s.space_id) = %s
-                              AND s.sensor_type IN ('camera', 'cctv', 'demo_camera')
+                            WHERE {space_condition}
+                              AND {cctv_type_condition}
                             ORDER BY s.sen_name
                             """,
                             (map_id, space_id),
                         )
                     else:
                         cursor.execute(
-                            """
+                            f"""
                             SELECT
                                 s.sen_id,
                                 s.sensor_id,
@@ -2332,8 +2438,8 @@ class DatabaseHandler:
                                 c.demo_video_key
                             FROM camera_info c
                             JOIN sensor s ON c.sen_id = s.sen_id
-                            WHERE COALESCE(c.space_id, s.space_id) = %s
-                              AND s.sensor_type IN ('camera', 'cctv', 'demo_camera')
+                            WHERE {space_condition}
+                              AND {cctv_type_condition}
                             ORDER BY s.sen_name
                             """,
                             (space_id,),
