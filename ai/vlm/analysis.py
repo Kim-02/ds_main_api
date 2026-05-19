@@ -52,6 +52,7 @@ class SafetyAnalysisVlm:
             "YOLO 정규화 이력은 사람 이동/위험 객체 흐름 보정용 보조 근거입니다.\n"
             "마지막 화면에 안 보이는 사람/객체는 현재 이동 중이라고 말하지 마세요.\n"
             "불/연기 이상상황, 사람 이동 위치, 최근 이력을 반영해 안전 정보를 반환하세요.\n"
+            "검증 person 값에 옷 색/보호구 단서가 있으면 이동 경로 줄에 함께 써서 관리자가 사람을 구분하게 하세요.\n"
             "정확히 3줄만 출력하세요. 각 줄 40자 이내, 질문 금지.\n"
             "1줄: 이동 경로: ...\n"
             "2줄: 상황 분석: ...\n"
@@ -73,6 +74,7 @@ class SafetyAnalysisVlm:
             "fire_dir": validation.get("fire_direction", "unknown"),
             "smoke_dir": validation.get("smoke_direction", "unknown"),
             "risk": validation.get("risk_level", "unknown"),
+            "person": validation.get("person_appearance", "unknown"),
             "sit": validation.get("situation", ""),
             "why": validation.get("reason_prediction", ""),
             "ev": validation.get("evidence", ""),

@@ -779,6 +779,10 @@ def _normalize_worker_regression_vlm_result(
         "confidence": "low",
         "detail": "화면에서 자세·이동 패턴을 확인할 수 없습니다.",
     })
+    normalized.setdefault(
+        "person_identification",
+        _default_person_identification(yolo_context, target_worker_match="unknown"),
+    )
 
     # 비틀거림·낙상 탐지 시 risk_level 강제 상향
     abnormal = str(normalized.get("abnormal_behavior") or "").strip().lower()
@@ -938,6 +942,10 @@ def _fallback_worker_vlm_result(
         "visible_people": _visible_people_from_yolo(yolo_context),
         "person_actions": ["unknown"],
         "worker_location": "same_space_unknown",
+        "person_identification": _default_person_identification(
+            yolo_context,
+            target_worker_match="unknown",
+        ),
         "abnormal_behavior": "unknown",
         "visible_risks": _visible_risks_from_yolo(yolo_context),
         "environment_status": {
@@ -987,6 +995,7 @@ def _fallback_environment_vlm_result(
         },
         "visible_people": _visible_people_from_yolo(yolo_context),
         "worker_movements": _detection_text_from_yolo(yolo_context),
+        "person_identification": _default_person_identification(yolo_context),
         "abnormal_behavior": "not_visible",
         "field_status": "VLM 응답 오류로 현장 상태를 자동 확인하세요.",
         "health_risk_summary": health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요",
@@ -1032,6 +1041,43 @@ def _detection_text_from_yolo(yolo_context: dict | None) -> str:
     if public.get("normalized_text_preview"):
         return str(public.get("normalized_text_preview"))
     return "YOLO 탐지 요약 없음"
+
+
+def _default_person_identification(
+    yolo_context: dict | None,
+    *,
+    target_worker_match: str | None = None,
+) -> dict:
+    visible_people = _visible_people_from_yolo(yolo_context)
+    movement = "unknown"
+    position = "unknown"
+    summary = yolo_context.get("detection_summary") if isinstance(yolo_context, dict) else {}
+    if isinstance(summary, dict):
+        person_movement = summary.get("person_movement") if isinstance(summary.get("person_movement"), dict) else {}
+        movement = str(person_movement.get("direction") or ("none" if visible_people == "none" else "unknown"))
+        current = summary.get("current") if isinstance(summary.get("current"), dict) else {}
+        person = current.get("person") if isinstance(current.get("person"), dict) else {}
+        position = str(person.get("position") or ("none" if visible_people == "none" else "unknown"))
+
+    result = {
+        "moving_people": [],
+        "note": "화면에서 사람의 옷 색/보호구 구분 단서를 확인하지 못했습니다.",
+    }
+    if target_worker_match is not None:
+        result["target_worker_match"] = target_worker_match
+
+    if visible_people != "none":
+        result["moving_people"].append({
+            "label": "사람1",
+            "clothing": "unknown",
+            "ppe": "unknown",
+            "position": position,
+            "movement": movement,
+            "confidence": "low",
+        })
+        result["note"] = "YOLO는 사람 위치/이동만 제공하며 옷 색은 VLM 화면 분석이 필요합니다."
+
+    return result
 
 
 def _as_bool(value: Any) -> bool:

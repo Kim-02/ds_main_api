@@ -42,6 +42,8 @@ def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | No
         "반드시 모든 응답 필드 값을 한국어로 작성하세요. 영어 사용 금지.\n"
         "산업 안전 안내만 작성, 의료 진단 금지. 가능성/주의/관리자 확인 표현을 사용하세요.\n"
         "현재 CCTV 이미지 우선, YOLO 10초 정규화는 보조 근거. 화면에 보이지 않는 것은 확정하지 마세요.\n"
+        "사람이 보이면 개인 신원 추정은 금지하고, 옷 색/안전모·조끼 색/화면 위치/이동 방향 같은 시각 구분 단서만 기록하세요.\n"
+        "옷 색이나 보호구가 불확실하면 추측하지 말고 unknown 또는 확인 필요로 쓰세요.\n"
         f"현재시각={datetime.now().isoformat(timespec='seconds')}\n"
         f"카메라={json_dumps(compact_camera_for_prompt(camera))}\n"
         f"{format_yolo_context_for_prompt(yolo_context)}\n"
@@ -60,6 +62,8 @@ def build_environment_health_prompt(camera: dict, trigger: dict, yolo_context: d
         "─ field_status: 현재 화면에서 보이는 현장 상태를 한 문장으로 묘사하세요.\n"
         "─ worker_movements: YOLO 10초 관찰 결과를 자연어로 작성하세요.\n"
         "  예) '2명 관찰, 10초간 안정적 정지 상태' / '1명 관찰, 불규칙 이동·비틀거림 의심'\n"
+        "─ person_identification: 움직이는 사람 또는 건강 위험 판단 대상 후보의 구분 단서를 작성하세요.\n"
+        "  예) '화면 중앙의 노란 안전모·주황 조끼 작업자, 오른쪽으로 이동'. 얼굴/이름/신원은 추정 금지.\n"
         "─ abnormal_behavior: staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나만 쓰세요.\n"
         "  - YOLO delta가 크거나 불규칙 → staggering, 이미지에서 쓰러짐 → falling, 정상 직립 → normal\n"
         "  - staggering 또는 falling 탐지 시 risk_level=high 이상, recommended_actions 맨 앞에 '즉시 현장 확인' 추가\n"
@@ -90,8 +94,10 @@ def build_worker_regression_prompt(camera: dict, trigger: dict, yolo_context: di
         "② YOLO 10초 이력(person_movement.delta)에서 이동 패턴을 보세요: delta 값이 크거나 방향이 불규칙하면 staggering 가능성. 작고 일정하면 normal.\n"
         "③ abnormal_behavior 필드에 아래 중 하나를 반드시 채우세요:\n"
         "   'staggering'(비틀거림), 'falling'(쓰러짐·낙상), 'slumping'(축 처짐), 'crouching'(쭈그림), 'leaning'(기댐), 'normal'(정상), 'not_visible'(화면 미확인)\n"
-        "④ staggering 또는 falling 탐지 시 risk_level을 최소 high로 올리고, recommended_actions에 즉각 현장 확인을 추가하세요.\n"
-        "⑤ 화면에 사람이 없으면 abnormal_behavior='not_visible'로 쓰고, YOLO 이력만 참고해 판단하세요.\n"
+        "④ 사람이 보이면 person_identification에 옷 색, 안전모/조끼 색, 화면 위치, 이동 방향을 써서 관리자가 구분 가능하게 하세요.\n"
+        "⑤ 워치 대상 작업자를 화면에서 특정할 수 없으면 target_worker_match='unknown' 또는 'not_visible'로 쓰세요. 옷 색만으로 특정 작업자라고 단정하지 마세요.\n"
+        "⑥ staggering 또는 falling 탐지 시 risk_level을 최소 high로 올리고, recommended_actions에 즉각 현장 확인을 추가하세요.\n"
+        "⑦ 화면에 사람이 없으면 abnormal_behavior='not_visible'로 쓰고, YOLO 이력만 참고해 판단하세요.\n"
         f"작업자회귀판단={json_dumps(context)}\n"
         "코드블록 없이 JSON 하나만 출력하세요.\n"
         f"응답형식={_common_response_schema(target_type='worker')}"
@@ -317,6 +323,19 @@ def _common_response_schema(*, target_type: str) -> str:
             "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
             "health_risk_summary": "",
             "worker_risks": [],
+            "person_identification": {
+                "moving_people": [
+                    {
+                        "label": "사람1",
+                        "clothing": "상의/하의 색 또는 unknown",
+                        "ppe": "안전모/조끼 색 또는 unknown",
+                        "position": "화면 위치",
+                        "movement": "이동 방향",
+                        "confidence": "high|medium|low",
+                    }
+                ],
+                "note": "사람 구분 단서 요약",
+            },
             "recommended_actions": [],
             "target": {
                 "type": "site",
@@ -340,6 +359,20 @@ def _common_response_schema(*, target_type: str) -> str:
             },
             "visible_people": "",
             "worker_location": "",
+            "person_identification": {
+                "target_worker_match": "matched|possible|not_visible|unknown",
+                "moving_people": [
+                    {
+                        "label": "사람1",
+                        "clothing": "상의/하의 색 또는 unknown",
+                        "ppe": "안전모/조끼 색 또는 unknown",
+                        "position": "화면 위치",
+                        "movement": "이동 방향",
+                        "confidence": "high|medium|low",
+                    }
+                ],
+                "note": "워치 대상과 화면상 사람의 구분 단서",
+            },
             "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
             "behavior_observation": {
                 "posture": "upright|leaning|crouching|fallen|unknown",

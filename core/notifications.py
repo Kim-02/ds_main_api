@@ -126,6 +126,7 @@ def _extract_site_vlm_text(result: dict) -> str:
     summary = str(result.get("summary") or "").strip()
     field_status = str(result.get("field_status") or "").strip()
     worker_movements = str(result.get("worker_movements") or "").strip()
+    person_identification = _person_identification_text(result.get("person_identification"))
     health_risk_summary = str(result.get("health_risk_summary") or "").strip()
     recommended_actions = result.get("recommended_actions")
 
@@ -135,6 +136,8 @@ def _extract_site_vlm_text(result: dict) -> str:
         parts.append(f"현장 상태: {field_status}")
     if worker_movements and worker_movements not in {"none", "unknown"}:
         parts.append(f"작업자 동향: {worker_movements}")
+    if person_identification:
+        parts.append(f"구분 단서: {person_identification}")
     if health_risk_summary:
         parts.append(f"건강 위험: {health_risk_summary}")
     if isinstance(recommended_actions, list):
@@ -159,6 +162,7 @@ def _extract_worker_vlm_text(result: dict) -> str:
 
     behavior_obs = result.get("behavior_observation") if isinstance(result.get("behavior_observation"), dict) else {}
     obs_detail = str(behavior_obs.get("detail") or "").strip()
+    person_identification = _person_identification_text(result.get("person_identification"))
     _default_obs = "화면에서 자세·이동 패턴을 확인할 수 없습니다."
 
     # ① CCTV 행동 관찰
@@ -177,6 +181,9 @@ def _extract_worker_vlm_text(result: dict) -> str:
         parts.append(f"화면: {obs_text}")
     elif abnormal in {"not_visible", "unknown"}:
         parts.append("화면: 작업자 위치 미확인")
+
+    if person_identification:
+        parts.append(f"구분 단서: {person_identification}")
 
     # ② 작업자명 + 휴식 권고 레벨
     rest_label = _rest_recommendation_label(rest_rec) or _rest_recommendation_label(summary)
@@ -202,6 +209,54 @@ def _extract_worker_vlm_text(result: dict) -> str:
                 break
 
     return " | ".join(parts) if parts else summary
+
+
+def format_person_identification_text(value) -> str:
+    """VLM의 사람 구분 단서를 앱 알림용 한 줄로 압축한다."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        return "" if text.lower() in {"", "none", "unknown", "not_visible", "null"} else text
+    if isinstance(value, list):
+        people = value
+        note = ""
+        target_match = ""
+    elif isinstance(value, dict):
+        people = value.get("moving_people") or value.get("people") or []
+        note = str(value.get("note") or "").strip()
+        target_match = str(value.get("target_worker_match") or "").strip()
+    else:
+        return ""
+
+    items = []
+    if target_match and target_match not in {"unknown", "not_visible"}:
+        items.append(f"대상매칭={target_match}")
+
+    if isinstance(people, list):
+        for person in people[:2]:
+            if not isinstance(person, dict):
+                text = str(person or "").strip()
+                if text:
+                    items.append(text)
+                continue
+
+            details = []
+            for key in ("label", "clothing", "ppe", "position", "movement"):
+                text = str(person.get(key) or "").strip()
+                if text and text.lower() not in {"none", "unknown", "not_visible", "null"}:
+                    details.append(text)
+            if details:
+                items.append(" / ".join(details))
+
+    if note and note.lower() not in {"none", "unknown", "not_visible", "null"}:
+        items.append(note)
+
+    return "; ".join(dict.fromkeys(items))
+
+
+def _person_identification_text(value) -> str:
+    return format_person_identification_text(value)
 
 
 def _rest_recommendation_label(text: str) -> str:

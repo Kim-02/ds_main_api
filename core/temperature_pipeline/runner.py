@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from config import settings
+from core.notifications import format_person_identification_text
 from core.watch_pipeline.camera_vlm import (
     WatchCameraVlmSession,
 )
@@ -838,6 +839,8 @@ def _normalize_temperature_vlm_result(
         normalized["person_movement"] = detection_info.get("person_movement", {})
         if not _has_meaningful_text(normalized.get("worker_movements")):
             normalized["worker_movements"] = detection_info.get("text", "")
+        if not isinstance(normalized.get("person_identification"), dict):
+            normalized["person_identification"] = _default_person_identification_from_detection_info(detection_info)
 
     if health_attention and not _has_meaningful_text(normalized.get("health_risk_summary")):
         normalized["health_risk_summary"] = health_attention.get("summary") or "현장 건강 취약 작업자 정보 확인 필요"
@@ -878,6 +881,7 @@ def _compose_temperature_alert_message(result: dict) -> str:
     summary = str(result.get("summary") or "").strip()
     field_status = str(result.get("field_status") or "").strip()
     worker_movements = str(result.get("worker_movements") or "").strip()
+    person_identification = format_person_identification_text(result.get("person_identification"))
     health_risk_summary = str(result.get("health_risk_summary") or "").strip()
     recommended_actions = result.get("recommended_actions")
     abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
@@ -899,6 +903,8 @@ def _compose_temperature_alert_message(result: dict) -> str:
         parts.append(f"현장 상태: {field_status}")
     if worker_movements and worker_movements not in {"none", "unknown", "not_visible"}:
         parts.append(f"작업자 동향: {worker_movements}")
+    if person_identification:
+        parts.append(f"구분 단서: {person_identification}")
     if health_risk_summary:
         parts.append(f"건강 위험: {health_risk_summary}")
     if isinstance(recommended_actions, list):
@@ -953,6 +959,26 @@ def _build_detection_info_from_yolo(yolo_context: dict) -> dict:
         "current": current,
         "text": text,
     }
+
+
+def _default_person_identification_from_detection_info(detection_info: dict) -> dict:
+    visible_people = str(detection_info.get("visible_people") or "unknown")
+    movement = detection_info.get("person_movement") if isinstance(detection_info.get("person_movement"), dict) else {}
+    result = {
+        "moving_people": [],
+        "note": "화면에서 사람의 옷 색/보호구 구분 단서를 확인하지 못했습니다.",
+    }
+    if visible_people != "none":
+        result["moving_people"].append({
+            "label": "사람1",
+            "clothing": "unknown",
+            "ppe": "unknown",
+            "position": "unknown",
+            "movement": str(movement.get("direction") or "unknown"),
+            "confidence": "low",
+        })
+        result["note"] = "YOLO는 사람 이동만 제공하며 옷 색은 VLM 화면 분석이 필요합니다."
+    return result
 
 
 def _current_count(current: dict, class_name: str) -> int:

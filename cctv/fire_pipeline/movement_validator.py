@@ -140,11 +140,13 @@ def build_validation_prompt(payload, max_chars, normalized_text=""):
         "왼쪽=첫 프레임, 오른쪽=마지막 프레임입니다. "
         "현재 보이는 person/fire/smoke box를 우선 비교해 이동 방향과 위험을 검증하세요.\n"
         "마지막 프레임에 보이지 않는 사람/객체는 현재 이동 판단에서 제외하세요.\n"
+        "사람이 보이면 옷 색, 안전모/조끼 색, 화면 위치 등 이동 중인 사람을 구분할 단서를 person_appearance에 짧게 쓰세요. 불확실하면 unknown.\n"
         "반드시 JSON만 출력하세요. 값은 짧게 쓰세요.\n"
         '{"movement_valid":true,"person_direction":"left|right|up|down|stable|unknown",'
         '"corrected_direction":"left|right|up|down|stable|unknown",'
         '"fire_direction":"left|right|up|down|stable|unknown",'
         '"smoke_direction":"left|right|up|down|stable|unknown",'
+        '"person_appearance":"옷 색/보호구/위치 또는 unknown",'
         '"risk_level":"low|medium|high|unknown","situation":"짧게",'
         '"reason_prediction":"짧게","evidence":"짧게"}\n'
         "YOLO정규화텍스트=\n"
@@ -173,6 +175,7 @@ def normalize_validation_result(data):
         "corrected_direction": str(data.get("corrected_direction", data.get("person_direction", "unknown"))),
         "fire_direction": str(data.get("fire_direction", "unknown")),
         "smoke_direction": str(data.get("smoke_direction", "unknown")),
+        "person_appearance": str(data.get("person_appearance", "unknown"))[:120],
         "risk_level": str(data.get("risk_level", "unknown")),
         "situation": str(data.get("situation", ""))[:160],
         "reason_prediction": str(data.get("reason_prediction", ""))[:160],
@@ -237,6 +240,7 @@ class MovementValidator:
                 "corrected_direction": "unknown",
                 "fire_direction": "unknown",
                 "smoke_direction": "unknown",
+                "person_appearance": "unknown",
                 "risk_level": "unknown",
                 "situation": "",
                 "reason_prediction": "",

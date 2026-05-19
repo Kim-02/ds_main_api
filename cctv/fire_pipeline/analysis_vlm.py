@@ -84,6 +84,7 @@ class SafetyAnalysisVlm:
             "YOLO fire/smoke는 오탐일 수 있습니다. 현재 이미지에서 불꽃/연기가 명확할 때만 화재/연기라고 확정하세요.\n"
             "명확하지 않으면 '화재 의심/확인 필요'라고 쓰고, 불/연기가 고정되어 있다거나 이동한다고 단정하지 마세요.\n"
             "불/연기 이상상황, 사람 이동 위치, 최근 이력을 반영해 안전 정보를 반환하세요.\n"
+            "검증 person 값에 옷 색/보호구 단서가 있으면 이동 경로 줄에 함께 써서 관리자가 사람을 구분하게 하세요.\n"
             "정확히 3줄만 출력하세요. 각 줄 40자 이내, 질문 금지.\n"
             "1줄: 이동 경로: ...\n"
             "2줄: 상황 분석: ...\n"
@@ -109,6 +110,7 @@ class SafetyAnalysisVlm:
             "fire_dir": validation.get("fire_direction", "unknown"),
             "smoke_dir": validation.get("smoke_direction", "unknown"),
             "risk": validation.get("risk_level", "unknown"),
+            "person": validation.get("person_appearance", "unknown"),
             "sit": validation.get("situation", ""),
             "why": validation.get("reason_prediction", ""),
             "ev": validation.get("evidence", "")
