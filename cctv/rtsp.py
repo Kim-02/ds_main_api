@@ -19,27 +19,22 @@ logger = logging.getLogger(__name__)
 _cap_open_lock = threading.Lock()
 
 
-def _split_rtsp_credentials(rtsp_url: str) -> tuple[str, str, str]:
-    """RTSP URL에서 자격증명을 분리해 (clean_url, username, password)를 반환한다.
-
-    URL에 포함된 percent-encoded 문자(%40 등)를 디코딩해서 raw 값을 반환한다.
-    일부 Jetson FFMPEG 버전이 %40을 @으로 디코딩하지 않아 401이 발생하는 문제를 우회한다.
-    """
-    parsed = urlparse(rtsp_url)
-    username = unquote(parsed.username or "")
-    password = unquote(parsed.password or "")
-
-    if not username and not password:
-        return rtsp_url, "", ""
-
-    host = parsed.hostname or ""
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-    clean_url = f"{parsed.scheme}://{host}{parsed.path}"
-    if parsed.query:
-        clean_url += f"?{parsed.query}"
-
-    return clean_url, username, password
+def _mask_rtsp_url(rtsp_url: str) -> str:
+    """로그용: RTSP URL의 password를 *** 으로 마스킹한다."""
+    try:
+        parsed = urlparse(rtsp_url)
+        if not parsed.password:
+            return rtsp_url
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        user = parsed.username or ""
+        path = parsed.path or ""
+        if parsed.query:
+            path += f"?{parsed.query}"
+        return f"{parsed.scheme}://{user}:***@{host}{path}"
+    except Exception:
+        return rtsp_url
 
 
 @dataclass
@@ -118,25 +113,21 @@ class RtspReader:
 
         is_rtsp = str(self.rtsp_url).startswith("rtsp://")
         is_file_source = (not is_rtsp) and os.path.isfile(str(self.rtsp_url))
-        if is_rtsp:
-            cap_url, username, password = _split_rtsp_credentials(self.rtsp_url)
-        else:
-            cap_url, username, password = self.rtsp_url, "", ""
 
         while self.running:
             cap = None
 
             try:
                 if is_rtsp:
-                    base_opts = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
-                    if username or password:
-                        # %40 등 인코딩 문자를 raw 값으로 전달해 FFMPEG 인증 오류 방지
-                        base_opts += f"|user;{username}|password;{password}"
+                    # credentials는 URL에 그대로 포함해서 전달 (FFMPEG RTSP는 URL 인증이 표준)
+                    # 로그에만 마스킹 처리
                     with _cap_open_lock:
-                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = base_opts
-                        cap = cv2.VideoCapture(cap_url, cv2.CAP_FFMPEG)
+                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
+                        )
+                        cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
                 else:
-                    cap = cv2.VideoCapture(cap_url)
+                    cap = cv2.VideoCapture(self.rtsp_url)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 frame_interval = self._frame_interval(cap)
 
@@ -145,7 +136,7 @@ class RtspReader:
                     self._set_error("rtsp_open_failed")
                     logger.warning(
                         "RTSP open failed camera_id=%s url=%s",
-                        self.camera_id, cap_url,
+                        self.camera_id, _mask_rtsp_url(self.rtsp_url),
                     )
                     time.sleep(self.reconnect_delay)
                     continue

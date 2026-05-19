@@ -33,14 +33,18 @@ def build_rtsp_url(
     password: str,
     rtsp_path: str | None = None,
 ) -> str:
-    """IP + 계정 정보로 RTSP URL을 생성한다."""
+    """IP + 계정 정보로 RTSP URL을 생성한다.
+
+    DB에 이미 %40으로 인코딩된 값이 들어있어도 unquote → quote로 정규화해
+    %2540 같은 이중 인코딩을 방지한다.
+    """
     path = rtsp_path or settings.fire_pipeline_rtsp_path
 
     if not path.startswith("/"):
         path = f"/{path}"
 
-    encoded_username = quote(username, safe="")
-    encoded_password = quote(password, safe="")
+    encoded_username = quote(unquote(username or ""), safe="")
+    encoded_password = quote(unquote(password or ""), safe="")
 
     return f"rtsp://{encoded_username}:{encoded_password}@{ip_address}{path}"
 

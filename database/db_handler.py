@@ -2368,7 +2368,8 @@ class DatabaseHandler:
 
                         sensor_type = str(row.get("sensor_type") or "").lower()
                         is_camera = (
-                            "camera" in sensor_type
+                            row["is_demo"]
+                            or "camera" in sensor_type
                             or "cctv" in sensor_type
                             or "rtsp" in sensor_type
                             or "demo" in sensor_type
@@ -2376,6 +2377,17 @@ class DatabaseHandler:
 
                         row["is_camera"] = is_camera
                         row["camera_sen_id"] = row.get("sen_id") if is_camera else None
+
+                        # stream_url: 앱이 CCTV 클릭 시 어떻게 열지 구분하는 데 사용
+                        if row["is_demo"]:
+                            demo_key = row.get("demo_video_key") or "scenario3_fire"
+                            row["stream_url"] = f"demo://{demo_key}"
+                        elif is_camera and row.get("sen_id"):
+                            row["stream_url"] = (
+                                f"/api/v1/cctv/cameras/{row['sen_id']}/stream?source=buffer"
+                            )
+                        else:
+                            row["stream_url"] = None
 
                     return rows
 
