@@ -2396,98 +2396,75 @@ class DatabaseHandler:
             return []
 
     def get_available_cctvs_for_map(
-        self, space_id: int, map_id: Optional[int] = None
+        self,
+        space_id: int,
+        map_id: Optional[int] = None,
     ) -> list[dict]:
-        """space_id에 속한 CCTV 전체 목록을 반환한다 (이미 배치된 것도 포함).
-
-        - placed=1 : 이미 배치됨, placed=0 : 미배치
-        - health=0, is_online=0 이어도 목록에 포함 (배치 기능과 RTSP는 분리)
-        - demo_camera 포함 (ci.is_demo=1 또는 sensor_type에 camera/cctv/demo 계열)
-        - space_id 조건: COALESCE(s.space_id, ci.space_id) = space_id
-          OR jetson이 해당 space에 속하는 경우도 포함 (fallback)
         """
+        space_id 기준 CCTV 전체 목록 반환.
+
+        온습도 센서 조회 방식과 동일하게 단순화:
+        - 해당 space_id에 속한 CCTV/demo CCTV를 전부 가져온다.
+        - health=0이어도 가져온다.
+        - is_online=0이어도 가져온다.
+        - 이미 배치된 CCTV도 가져온다.
+        - map_id가 있으면 placed, x_ratio, y_ratio도 함께 반환한다.
+        """
+
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
-
-                    # ── 진단 로그: 전체 CCTV 데이터 먼저 확인 ────────────────
-                    cursor.execute(
-                        """
-                        SELECT
-                            s.sen_id,
-                            s.sensor_id,
-                            s.sensor_type,
-                            s.sen_name,
-                            s.space_id   AS sensor_space_id,
-                            s.jetson_id,
-                            ci.space_id  AS camera_space_id,
-                            ci.is_demo,
-                            ci.health
-                        FROM camera_info ci
-                        JOIN sensor s ON s.sen_id = ci.sen_id
-                        ORDER BY s.sen_id DESC
-                        LIMIT 30
-                        """
-                    )
-                    all_rows = cursor.fetchall()
-                    logging.info(
-                        "[MAP_CCTV_DB] all camera rows (up to 30): %s",
-                        [
-                            {
-                                "sen_id": r.get("sen_id"),
-                                "sensor_id": r.get("sensor_id"),
-                                "sensor_type": r.get("sensor_type"),
-                                "sensor_space_id": r.get("sensor_space_id"),
-                                "camera_space_id": r.get("camera_space_id"),
-                                "jetson_id": r.get("jetson_id"),
-                                "is_demo": r.get("is_demo"),
-                                "health": r.get("health"),
-                            }
-                            for r in all_rows
-                        ],
-                    )
-
-                    # ── 실제 쿼리 ─────────────────────────────────────────────
-                    # space_id 조건: sensor 또는 camera_info 의 space_id 가 일치하거나
-                    # 해당 sensor 의 jetson 이 이 space 에 속하는 경우 포함
                     if map_id is not None:
                         cursor.execute(
                             """
                             SELECT
                                 s.sen_id,
                                 s.sensor_id,
+                                s.sensor_type,
                                 s.sen_name,
                                 s.sen_locate,
-                                s.sensor_type,
+                                s.model,
+                                s.ip_addr,
                                 s.is_online,
+                                COALESCE(s.space_id, ci.space_id) AS space_id,
+                                sp.space_name,
+
                                 ci.ip_address,
                                 ci.camera_id,
+                                ci.camera_pw,
                                 ci.health,
                                 ci.is_demo,
                                 ci.demo_video_key,
-                                IF(p.sensor_id IS NOT NULL, 1, 0) AS placed,
+
+                                CASE
+                                    WHEN p.position_id IS NOT NULL THEN 1
+                                    ELSE 0
+                                END AS placed,
+                                p.position_id,
                                 p.x_ratio,
                                 p.y_ratio
+
                             FROM camera_info ci
-                            JOIN sensor s ON ci.sen_id = s.sen_id
+                            JOIN sensor s
+                            ON ci.sen_id = s.sen_id
+                            LEFT JOIN ds_space sp
+                            ON COALESCE(s.space_id, ci.space_id) = sp.space_id
                             LEFT JOIN sensor_map_position p
-                                ON p.sensor_id = s.sensor_id AND p.map_id = %s
-                            WHERE (
-                                COALESCE(s.space_id, ci.space_id) = %s
-                                OR s.jetson_id IN (
-                                    SELECT jetson_id FROM jetson WHERE space_id = %s
-                                )
-                            )
-                              AND (
+                            ON p.sensor_id = s.sensor_id
+                            AND p.map_id = %s
+
+                            WHERE COALESCE(s.space_id, ci.space_id) = %s
+                            AND (
                                 LOWER(s.sensor_type) LIKE '%%camera%%'
                                 OR LOWER(s.sensor_type) LIKE '%%cctv%%'
                                 OR LOWER(s.sensor_type) LIKE '%%rtsp%%'
                                 OR LOWER(s.sensor_type) LIKE '%%demo%%'
                                 OR ci.is_demo = 1
-                              )
+                            )
+
                             ORDER BY ci.is_demo DESC, s.sen_id DESC
                             """,
-                            (map_id, space_id, space_id),
+                            (map_id, space_id),
                         )
                     else:
                         cursor.execute(
@@ -2495,61 +2472,77 @@ class DatabaseHandler:
                             SELECT
                                 s.sen_id,
                                 s.sensor_id,
+                                s.sensor_type,
                                 s.sen_name,
                                 s.sen_locate,
-                                s.sensor_type,
+                                s.model,
+                                s.ip_addr,
                                 s.is_online,
+                                COALESCE(s.space_id, ci.space_id) AS space_id,
+                                sp.space_name,
+
                                 ci.ip_address,
                                 ci.camera_id,
+                                ci.camera_pw,
                                 ci.health,
                                 ci.is_demo,
                                 ci.demo_video_key,
-                                0  AS placed,
+
+                                0 AS placed,
+                                NULL AS position_id,
                                 NULL AS x_ratio,
                                 NULL AS y_ratio
+
                             FROM camera_info ci
-                            JOIN sensor s ON ci.sen_id = s.sen_id
-                            WHERE (
-                                COALESCE(s.space_id, ci.space_id) = %s
-                                OR s.jetson_id IN (
-                                    SELECT jetson_id FROM jetson WHERE space_id = %s
-                                )
-                            )
-                              AND (
+                            JOIN sensor s
+                            ON ci.sen_id = s.sen_id
+                            LEFT JOIN ds_space sp
+                            ON COALESCE(s.space_id, ci.space_id) = sp.space_id
+
+                            WHERE COALESCE(s.space_id, ci.space_id) = %s
+                            AND (
                                 LOWER(s.sensor_type) LIKE '%%camera%%'
                                 OR LOWER(s.sensor_type) LIKE '%%cctv%%'
                                 OR LOWER(s.sensor_type) LIKE '%%rtsp%%'
                                 OR LOWER(s.sensor_type) LIKE '%%demo%%'
                                 OR ci.is_demo = 1
-                              )
+                            )
+
                             ORDER BY ci.is_demo DESC, s.sen_id DESC
                             """,
-                            (space_id, space_id),
+                            (space_id,),
                         )
 
                     rows = cursor.fetchall()
 
-                    normalized = []
+                    result = []
                     for row in rows:
                         item = dict(row)
 
+                        # 앱 DTO에서 Boolean으로 받을 수 있게 변환
+                        item["is_online"] = bool(item.get("is_online", 0))
+                        item["health"] = bool(item.get("health", 0))
                         item["is_demo"] = bool(item.get("is_demo", 0))
                         item["placed"] = bool(item.get("placed", 0))
 
-                        # 앱에서 Boolean으로 받는 필드면 이것도 변환
-                        item["is_online"] = bool(item.get("is_online", 0))
-                        item["health"] = bool(item.get("health", 0))
-
-                        # 앱에서 camera_sen_id를 기대한다면 추가
+                        # 앱에서 CCTV 식별용으로 사용
+                        item["is_camera"] = True
                         item["camera_sen_id"] = item.get("sen_id")
 
-                        normalized.append(item)
+                        # demo CCTV는 앱 내부 영상 재생용
+                        if item["is_demo"]:
+                            demo_key = item.get("demo_video_key") or "scenario3_fire"
+                            item["stream_url"] = f"demo://{demo_key}"
+                        else:
+                            item["stream_url"] = None
+
+                        result.append(item)
 
                     logging.info(
-                        "[MAP_CCTV_DB] available-cctvs normalized space_id=%s map_id=%s result_count=%s rows=%s",
+                        "[MAP_CCTV_DB] cctv list by space_id=%s map_id=%s count=%s rows=%s",
                         space_id,
                         map_id,
-                        len(normalized),
+                        len(result),
                         [
                             {
                                 "sen_id": r.get("sen_id"),
@@ -2557,13 +2550,14 @@ class DatabaseHandler:
                                 "sensor_type": r.get("sensor_type"),
                                 "is_demo": r.get("is_demo"),
                                 "placed": r.get("placed"),
-                                "camera_sen_id": r.get("camera_sen_id"),
+                                "x_ratio": r.get("x_ratio"),
+                                "y_ratio": r.get("y_ratio"),
                             }
-                            for r in normalized
+                            for r in result
                         ],
                     )
 
-                    return normalized
+                    return result
 
         except Exception as e:
             logging.error("get_available_cctvs_for_map 오류: %s", e, exc_info=True)

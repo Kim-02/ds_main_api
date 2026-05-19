@@ -48,6 +48,7 @@ def get_available_cctvs_by_space(
         "[MAP_CCTV] available-cctvs result space_id=%s map_id=%s count=%s items=%s",
         space_id, map_id, len(cctvs) if cctvs else 0, cctvs,
     )
+    logger.info(cctvs)
     return {"status": "success", "data": cctvs}
 
 
