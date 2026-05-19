@@ -595,13 +595,29 @@ class ExportFinalPipeline:
             normalized_text,
             validation,
             image_path,
-            None
+            None,
+            workplace_info=self.get_workplace_info(),
         )
+
+    def get_workplace_info(self):
+        provider = getattr(self.config, "workplace_info_provider", None)
+        if callable(provider):
+            try:
+                info = provider()
+                if isinstance(info, dict):
+                    self.config.workplace_info = info
+                    return info
+            except Exception:
+                logger.exception(
+                    "[FirePipeline] workplace info provider failed camera_id=%s",
+                    self.config.camera_id,
+                )
+        return getattr(self.config, "workplace_info", {}) or {}
 
     def emit_result(self, answer, request_number=None):
         self.set_latest_result(answer)
         logger.info(
-            "[VLM TEXT] event_type=fire_pipeline camera_id=%s text=%s",
+            "[VLM TEXT] event_type=fire_pipeline camera_id=%s result=%s",
             self.config.camera_id,
             answer,
         )

@@ -59,6 +59,8 @@ class FirePipelineConfig:
 
         self.video_source = rtsp_url
         self.camera_id = None
+        self.workplace_info = {}
+        self.workplace_info_provider = None
         self.model_path = model_path or _model_path
 
         # 프레임·요약 저장 폴더 — 기존 data/frames/ 와 분리
@@ -104,7 +106,8 @@ class FirePipelineConfig:
         self.validation_vlm_temperature = 0.0
         self.validation_prompt_max_chars = int(_validation_prompt_max_chars)
 
-        self.analysis_vlm_max_tokens = int(_analysis_max_tokens)
+        # FirePipeline은 앱 알림용 JSON을 받아야 하므로 .env가 128로 낮아도 최소 512 토큰은 확보한다.
+        self.analysis_vlm_max_tokens = max(int(_analysis_max_tokens), 512)
         self.analysis_vlm_temperature = 0.2
         self.analysis_prompt_max_chars = int(_analysis_prompt_max_chars)
         self.analysis_stream = True

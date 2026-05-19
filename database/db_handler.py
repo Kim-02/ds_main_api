@@ -1488,8 +1488,8 @@ class DatabaseHandler:
                             s.updated_at,
                             COALESCE(c.space_id, s.space_id) AS space_id,
                             sp.space_name,
-                            NULL AS hazard_type,
-                            0    AS is_hazard
+                            sp.hazard_type,
+                            COALESCE(sp.is_hazard, 0) AS is_hazard
                         FROM camera_info c
                         JOIN sensor s
                           ON c.sen_id = s.sen_id
@@ -1557,8 +1557,8 @@ class DatabaseHandler:
                             s.updated_at,
                             COALESCE(c.space_id, s.space_id) AS space_id,
                             sp.space_name,
-                            NULL AS hazard_type,
-                            0    AS is_hazard
+                            sp.hazard_type,
+                            COALESCE(sp.is_hazard, 0) AS is_hazard
                         FROM camera_info c
                         JOIN sensor s
                           ON c.sen_id = s.sen_id
@@ -2607,10 +2607,15 @@ class DatabaseHandler:
                                 s.sensor_id,
                                 s.sen_name,
                                 COALESCE(c.space_id, s.space_id) AS space_id,
+                                sp.space_name,
+                                sp.hazard_type,
+                                COALESCE(sp.is_hazard, 0) AS is_hazard,
                                 c.demo_video_key
                             FROM camera_info c
                             JOIN sensor s
                               ON c.sen_id = s.sen_id
+                            LEFT JOIN ds_space sp
+                              ON COALESCE(c.space_id, s.space_id) = sp.space_id
                             WHERE c.is_demo = 1
                               AND c.demo_video_key = %s
                               AND COALESCE(c.space_id, s.space_id) = %s
@@ -2628,6 +2633,9 @@ class DatabaseHandler:
                                 "sensor_id": existing_demo.get("sensor_id") or sensor_id,
                                 "sen_name": existing_demo.get("sen_name") or name,
                                 "space_id": int(existing_demo.get("space_id") or space_id),
+                                "space_name": existing_demo.get("space_name"),
+                                "hazard_type": existing_demo.get("hazard_type"),
+                                "is_hazard": bool(existing_demo.get("is_hazard", 0)),
                                 "is_demo": True,
                                 "demo_video_key": existing_demo.get("demo_video_key") or demo_video_key,
                                 "reused": True,
@@ -2640,6 +2648,16 @@ class DatabaseHandler:
                         existing = cursor.fetchone()
                         if existing:
                             existing_sen_id = int(existing["sen_id"])
+                            cursor.execute(
+                                """
+                                SELECT space_name, hazard_type, COALESCE(is_hazard, 0) AS is_hazard
+                                FROM ds_space
+                                WHERE space_id = %s
+                                LIMIT 1
+                                """,
+                                (space_id,),
+                            )
+                            space = cursor.fetchone() or {}
                             # 중복이면 트랜잭션을 롤백하고 기존 항목 반환
                             conn.rollback()
                             return {
@@ -2647,6 +2665,9 @@ class DatabaseHandler:
                                 "sensor_id": sensor_id,
                                 "sen_name": name,
                                 "space_id": space_id,
+                                "space_name": space.get("space_name"),
+                                "hazard_type": space.get("hazard_type"),
+                                "is_hazard": bool(space.get("is_hazard", 0)),
                                 "is_demo": True,
                                 "demo_video_key": demo_video_key,
                                 "reused": True,
@@ -2695,6 +2716,17 @@ class DatabaseHandler:
                             (new_sen_id, space_id, demo_video_key),
                         )
 
+                        cursor.execute(
+                            """
+                            SELECT space_name, hazard_type, COALESCE(is_hazard, 0) AS is_hazard
+                            FROM ds_space
+                            WHERE space_id = %s
+                            LIMIT 1
+                            """,
+                            (space_id,),
+                        )
+                        space = cursor.fetchone() or {}
+
                     # cursor 블록 종료 후 commit (register_camera_info와 동일한 패턴)
                     conn.commit()
 
@@ -2703,6 +2735,9 @@ class DatabaseHandler:
                         "sensor_id": sensor_id,
                         "sen_name": name,
                         "space_id": space_id,
+                        "space_name": space.get("space_name"),
+                        "hazard_type": space.get("hazard_type"),
+                        "is_hazard": bool(space.get("is_hazard", 0)),
                         "is_demo": True,
                         "demo_video_key": demo_video_key,
                         "reused": False,

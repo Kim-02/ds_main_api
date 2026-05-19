@@ -34,6 +34,14 @@ def init_manager(loop: asyncio.AbstractEventLoop, broadcast_fn: Callable, db_han
 
 
 def _alert_level(answer: Any) -> str:
+    if isinstance(answer, dict):
+        risk_level = str(answer.get("risk_level") or "").lower()
+        if risk_level in {"critical", "danger"}:
+            return "danger"
+        if risk_level in {"high"}:
+            return "danger"
+        if risk_level in {"medium", "warning"}:
+            return "warning"
     text = str(answer or "")
     if any(word in text for word in ("화재", "연기", "대피", "위험", "긴급", "critical", "danger")):
         return "danger"
@@ -41,11 +49,86 @@ def _alert_level(answer: Any) -> str:
 
 
 def _alert_message(answer: Any) -> str:
+    if isinstance(answer, dict):
+        summary = str(answer.get("summary") or "").strip()
+        location = answer.get("workplace_location") if isinstance(answer.get("workplace_location"), dict) else {}
+        target = answer.get("target") if isinstance(answer.get("target"), dict) else {}
+        space_name = str(location.get("space_name") or target.get("site_name") or "").strip()
+        screen = str(answer.get("screen_analysis") or "").strip()
+        cause = answer.get("fire_cause") if isinstance(answer.get("fire_cause"), dict) else {}
+        spread = answer.get("spread_path") if isinstance(answer.get("spread_path"), dict) else {}
+        actions = answer.get("recommended_actions") if isinstance(answer.get("recommended_actions"), list) else []
+        parts = []
+        if summary:
+            parts.append(f"[{space_name}] {summary}" if space_name and space_name not in summary else summary)
+        if screen:
+            parts.append(f"화면: {screen}")
+        cause_text = str(cause.get("cause") or "").strip()
+        if cause_text:
+            parts.append(f"원인: {cause_text}")
+        spread_text = str(spread.get("route") or spread.get("direction") or "").strip()
+        if spread_text:
+            parts.append(f"확산: {spread_text}")
+        for action in actions[:2]:
+            action_text = str(action or "").strip()
+            if action_text:
+                parts.append(f"조치: {action_text}")
+        if parts:
+            return " | ".join(parts)
     return (
         extract_vlm_text(answer)
         or str(answer or "").strip()
         or "CCTV 화재/연기 autoregressive VLM 분석이 완료되었습니다."
     )
+
+
+def _answer_value(answer: Any, key: str, default: Any = "") -> Any:
+    if isinstance(answer, dict):
+        value = answer.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _answer_dict(answer: Any, key: str) -> dict:
+    if isinstance(answer, dict) and isinstance(answer.get(key), dict):
+        return answer.get(key) or {}
+    return {}
+
+
+def _metadata_from_db_row(row: dict | None, fallback: dict | None = None) -> dict:
+    fallback = dict(fallback or {})
+    if not row:
+        return fallback
+
+    metadata = dict(fallback)
+    space_id = row.get("space_id")
+    metadata.update({
+        "sen_id": int(row.get("sen_id") or fallback.get("sen_id") or 0),
+        "sensor_id": row.get("sensor_id") or fallback.get("sensor_id"),
+        "sen_name": row.get("sen_name") or fallback.get("sen_name") or fallback.get("camera_name"),
+        "space_id": int(space_id) if space_id is not None else fallback.get("space_id"),
+        "space_name": row.get("space_name") or fallback.get("space_name"),
+        "hazard_type": row.get("hazard_type") or fallback.get("hazard_type"),
+        "is_hazard": bool(row.get("is_hazard", fallback.get("is_hazard", False))),
+        "is_demo": bool(row.get("is_demo", fallback.get("is_demo", False))),
+        "demo_video_key": row.get("demo_video_key") or fallback.get("demo_video_key"),
+        "ip_address": row.get("ip_address") or fallback.get("ip_address"),
+        "camera_id": row.get("camera_id") or fallback.get("camera_id"),
+        "camera_pw": row.get("camera_pw") or fallback.get("camera_pw"),
+    })
+    return metadata
+
+
+def _load_workplace_metadata(camera_id: int, fallback: dict | None = None) -> dict:
+    if _db_handler is None:
+        return dict(fallback or {})
+    try:
+        row = _db_handler.get_cctv_by_sen_id(camera_id)
+        return _metadata_from_db_row(row, fallback)
+    except Exception:
+        logger.exception("[FirePipeline] DB workplace metadata load failed camera_id=%s", camera_id)
+        return dict(fallback or {})
 
 
 def _save_alert_event(camera_id: int, message: str, metadata: dict, *, level: str) -> int | None:
@@ -94,7 +177,7 @@ async def _broadcast_payload(payload: dict, *, camera_id: int, event_id: int | N
 
 def _make_on_result(camera_id: int, metadata: dict | None = None, generation: int = 0) -> Callable[[str], None]:
     """파이프라인 결과를 메모리에 저장하고 WebSocket으로 전송하는 콜백 생성."""
-    metadata = dict(metadata or {})
+    metadata = _load_workplace_metadata(camera_id, metadata or {})
 
     def on_result(answer: str, request_number: int | None = None) -> None:
         # stop/delete 이후 늦게 도착한 VLM 결과는 과거 이벤트이므로 DB 저장과 push를 모두 하지 않는다.
@@ -119,7 +202,8 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
 
         level = _alert_level(answer)
         message_text = _alert_message(answer)
-        event_id = _save_alert_event(camera_id, message_text, metadata, level=level)
+        current_metadata = _load_workplace_metadata(camera_id, metadata)
+        event_id = _save_alert_event(camera_id, message_text, current_metadata, level=level)
 
         with _pipelines_lock:
             entry = _pipelines.get(camera_id)
@@ -145,12 +229,12 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
                 message=message_text,
                 title="CCTV 화재/연기 감지",
                 level=level,
-                space_id=metadata.get("space_id"),
-                jetson_id=metadata.get("jetson_id"),
-                camera_sen_id=metadata.get("sen_id") or camera_id,
-                sensor_id=metadata.get("sensor_id"),
-                camera_name=metadata.get("sen_name") or metadata.get("camera_name") or "",
-                camera_loc=metadata.get("space_name") or metadata.get("sen_locate") or "",
+                space_id=current_metadata.get("space_id"),
+                jetson_id=current_metadata.get("jetson_id"),
+                camera_sen_id=current_metadata.get("sen_id") or camera_id,
+                sensor_id=current_metadata.get("sensor_id"),
+                camera_name=current_metadata.get("sen_name") or current_metadata.get("camera_name") or "",
+                camera_loc=current_metadata.get("space_name") or current_metadata.get("sen_locate") or "",
                 ev_code_name="CCTV 화재/연기 감지",
                 source="fire_pipeline",
                 vibration=True,
@@ -158,7 +242,20 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
                 duration_ms=5000,
                 reset_after_ms=15000,
                 vlm_result=answer,
-                hazard_material=metadata.get("hazard_type") or "",
+                hazard_material=_answer_value(answer, "hazard_material", current_metadata.get("hazard_type") or ""),
+                hazard_warning=_answer_value(answer, "hazard_warning", ""),
+                hazard_specific_action=_answer_value(answer, "hazard_specific_action", ""),
+                evacuation_route=_answer_value(answer, "evacuation_route", ""),
+                detection_info={
+                    "screen_analysis": _answer_value(answer, "screen_analysis", ""),
+                    "fire_cause": _answer_dict(answer, "fire_cause"),
+                    "spread_path": _answer_dict(answer, "spread_path"),
+                    "workplace_location": _answer_dict(answer, "workplace_location"),
+                    "visible_people": _answer_value(answer, "visible_people", ""),
+                },
+                person_movement={
+                    "summary": _answer_value(answer, "person_movement", ""),
+                },
             )
             try:
                 asyncio.run_coroutine_threadsafe(
@@ -244,6 +341,9 @@ def start_pipeline(
     try:
         config = FirePipelineConfig(rtsp_url=rtsp_url, model_path=model_path)
         config.camera_id = camera_id
+        initial_metadata = _load_workplace_metadata(camera_id, metadata or {})
+        config.workplace_info = initial_metadata
+        config.workplace_info_provider = lambda: _load_workplace_metadata(camera_id, initial_metadata)
         on_result = _make_on_result(camera_id, metadata, generation)
         pipeline = ExportFinalPipeline(config, on_result=on_result)
 
