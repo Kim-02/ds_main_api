@@ -55,10 +55,11 @@ def _alert_message(answer: Any) -> str:
         location = answer.get("workplace_location") if isinstance(answer.get("workplace_location"), dict) else {}
         target = answer.get("target") if isinstance(answer.get("target"), dict) else {}
         space_name = str(location.get("space_name") or target.get("site_name") or "").strip()
-        screen = str(answer.get("screen_analysis") or "").strip()
+        screen = _clean_alert_text(answer.get("screen_analysis"), max_chars=140)
         cause = answer.get("fire_cause") if isinstance(answer.get("fire_cause"), dict) else {}
         spread = answer.get("spread_path") if isinstance(answer.get("spread_path"), dict) else {}
         actions = answer.get("recommended_actions") if isinstance(answer.get("recommended_actions"), list) else []
+        hazard_material = _clean_alert_text(answer.get("hazard_material"), max_chars=40)
         parts = []
         if summary:
             parts.append(f"[{space_name}] {summary}" if space_name and space_name not in summary else summary)
@@ -70,8 +71,10 @@ def _alert_message(answer: Any) -> str:
         spread_text = str(spread.get("route") or spread.get("direction") or "").strip()
         if spread_text:
             parts.append(f"확산: {spread_text}")
+        if hazard_material and hazard_material.lower() != "none":
+            parts.append(f"위험물: {hazard_material}")
         for action in actions[:2]:
-            action_text = str(action or "").strip()
+            action_text = _clean_alert_text(action, max_chars=120)
             if action_text:
                 parts.append(f"조치: {action_text}")
         if parts:
@@ -95,6 +98,62 @@ def _answer_dict(answer: Any, key: str) -> dict:
     if isinstance(answer, dict) and isinstance(answer.get(key), dict):
         return answer.get(key) or {}
     return {}
+
+
+def _looks_like_json_fragment(text: str) -> bool:
+    value = text.strip()
+    if value.startswith("```") or value.startswith("{") or value.startswith("["):
+        return True
+    return any(marker in value for marker in ('"risk_level"', '"screen_analysis"', '"recommended_actions"'))
+
+
+def _clean_alert_text(value: Any, max_chars: int = 160, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        return default
+    if _looks_like_json_fragment(text):
+        return default
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
+
+
+def _sanitize_fire_alert_result(answer: Any) -> Any:
+    if not isinstance(answer, dict):
+        return answer
+
+    result = dict(answer)
+    result.pop("raw_text", None)
+
+    screen = _clean_alert_text(result.get("screen_analysis"), max_chars=220)
+    if not screen:
+        screen = "YOLO가 화재/연기 위험 신호를 감지했으며 현장 확인이 필요합니다."
+    result["screen_analysis"] = screen
+
+    for key, max_chars in (
+        ("summary", 120),
+        ("visible_people", 80),
+        ("person_movement", 100),
+        ("hazard_material", 40),
+        ("hazard_warning", 160),
+        ("hazard_specific_action", 160),
+        ("evacuation_route", 120),
+    ):
+        cleaned = _clean_alert_text(result.get(key), max_chars=max_chars)
+        if cleaned:
+            result[key] = cleaned
+
+    actions = result.get("recommended_actions")
+    if isinstance(actions, list):
+        result["recommended_actions"] = [
+            cleaned
+            for cleaned in (_clean_alert_text(action, max_chars=120) for action in actions)
+            if cleaned
+        ][:3]
+
+    return result
 
 
 def _json_preview(value: Any, max_chars: int = 2000) -> str:
@@ -218,7 +277,8 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
             return
 
         level = _alert_level(answer)
-        message_text = _alert_message(answer)
+        app_answer = _sanitize_fire_alert_result(answer)
+        message_text = _alert_message(app_answer)
         current_metadata = _load_workplace_metadata(camera_id, metadata)
         event_id = _save_alert_event(camera_id, message_text, current_metadata, level=level)
 
@@ -235,7 +295,7 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
                     request_number if request_number is not None else "-",
                 )
                 return
-            entry["latest_result"] = answer
+            entry["latest_result"] = app_answer
             entry["latest_event_id"] = event_id
 
         if _loop is not None and _broadcast_fn is not None:
@@ -258,20 +318,20 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
                 led=True,
                 duration_ms=5000,
                 reset_after_ms=15000,
-                vlm_result=answer,
-                hazard_material=_answer_value(answer, "hazard_material", current_metadata.get("hazard_type") or ""),
-                hazard_warning=_answer_value(answer, "hazard_warning", ""),
-                hazard_specific_action=_answer_value(answer, "hazard_specific_action", ""),
-                evacuation_route=_answer_value(answer, "evacuation_route", ""),
+                vlm_result=app_answer,
+                hazard_material=_answer_value(app_answer, "hazard_material", current_metadata.get("hazard_type") or ""),
+                hazard_warning=_answer_value(app_answer, "hazard_warning", ""),
+                hazard_specific_action=_answer_value(app_answer, "hazard_specific_action", ""),
+                evacuation_route=_answer_value(app_answer, "evacuation_route", ""),
                 detection_info={
-                    "screen_analysis": _answer_value(answer, "screen_analysis", ""),
-                    "fire_cause": _answer_dict(answer, "fire_cause"),
-                    "spread_path": _answer_dict(answer, "spread_path"),
-                    "workplace_location": _answer_dict(answer, "workplace_location"),
-                    "visible_people": _answer_value(answer, "visible_people", ""),
+                    "screen_analysis": _answer_value(app_answer, "screen_analysis", ""),
+                    "fire_cause": _answer_dict(app_answer, "fire_cause"),
+                    "spread_path": _answer_dict(app_answer, "spread_path"),
+                    "workplace_location": _answer_dict(app_answer, "workplace_location"),
+                    "visible_people": _answer_value(app_answer, "visible_people", ""),
                 },
                 person_movement={
-                    "summary": _answer_value(answer, "person_movement", ""),
+                    "summary": _answer_value(app_answer, "person_movement", ""),
                 },
             )
             logger.info(
