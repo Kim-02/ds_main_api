@@ -94,22 +94,21 @@ class SafetyAnalysisVlm:
         workplace = self.compact_workplace_info(workplace_info or getattr(self.config, "workplace_info", {}))
         validation_text = json.dumps(self.compact_validation(validation), ensure_ascii=False)
         hazard_material = str(workplace.get("hazard_type") or "none")
-        hazard_guide = hazard_response_guide(hazard_material)
-        response_schema = self.response_schema(workplace, hazard_guide)
+        response_schema = self.response_schema()
         prefix = (
             "분석 명칭: autoregressive VLM.\n"
-            "현재 이미지 우선, YOLO 10초 이력은 보조 근거입니다.\n"
+            "현재 이미지와 짧은 탐지 이력으로 현장 상황과 확산 방향만 판단하세요.\n"
             "마지막 화면에 없는 사람/객체는 현재 보인다고 쓰지 마세요.\n"
             "불꽃/연기가 불명확하면 확인 필요라고 쓰세요.\n"
-            "작업장정보와 위험물조치가이드는 DB 등록값이므로 조치에 반영하세요.\n"
-            "코드블록 없이 JSON 하나만 출력하세요. 모든 값은 짧은 한국어 문장으로 작성하세요.\n"
+            "작업장 위치와 위험물 조치 문구는 DB에서 채우므로 반복하지 마세요.\n"
+            "현장 설명, 확산 방향, 사람 유무에 집중하세요.\n"
+            "코드블록 없이 JSON 하나만 출력하세요. 모든 값은 매우 짧은 한국어 문장으로 작성하세요.\n"
             "빈 문자열 금지. 모르면 unknown 또는 확인 필요.\n"
-            f"작업장정보={json_dumps(workplace)}\n"
-            f"위험물조치가이드={hazard_guide}\n"
+            f"작업장={workplace.get('space_name') or 'unknown'},등록위험물={hazard_material}\n"
             f"응답형식={json_dumps(response_schema)}\n"
             "검증="
         )
-        middle = validation_text + "\n이력="
+        middle = validation_text + "\n탐지이력="
         allowed = self.config.analysis_prompt_max_chars - len(prefix) - len(middle)
 
         if allowed < 0:
@@ -135,7 +134,7 @@ class SafetyAnalysisVlm:
             "source_type": info.get("source_type") or "",
         }
 
-    def response_schema(self, workplace, hazard_guide):
+    def response_schema(self):
         return {
             "risk_level": "warning|danger|critical",
             "summary": "한 줄 알림",
@@ -150,12 +149,6 @@ class SafetyAnalysisVlm:
             },
             "visible_people": "사람 수/위치",
             "person_movement": "이동/구분 단서",
-            "hazard_specific_action": hazard_guide,
-            "evacuation_route": "대피 방향",
-            "recommended_actions": [
-                "조치 1",
-                "조치 2"
-            ]
         }
 
     def compact_validation(self, validation):
@@ -166,26 +159,20 @@ class SafetyAnalysisVlm:
             "smoke_dir": validation.get("smoke_direction", "unknown"),
             "risk": validation.get("risk_level", "unknown"),
             "person": validation.get("person_appearance", "unknown"),
-            "sit": validation.get("situation", ""),
-            "why": validation.get("reason_prediction", ""),
-            "ev": validation.get("evidence", "")
         }
 
-    def fallback_screen_analysis(self, validation):
+    def fallback_screen_analysis(self, validation, workplace):
         fire_direction = direction_to_korean(validation.get("fire_dir"))
         smoke_direction = direction_to_korean(validation.get("smoke_dir"))
-        parts = ["YOLO가 화재/연기 위험 신호를 감지했습니다."]
+        space_name = workplace.get("space_name") or "작업장"
+        parts = [f"{space_name}에서 화재/연기 위험이 감지되었습니다."]
 
         if fire_direction != "확인 필요":
             parts.append(f"불꽃 방향은 {fire_direction}으로 추정됩니다.")
         if smoke_direction != "확인 필요":
             parts.append(f"연기 방향은 {smoke_direction}으로 추정됩니다.")
 
-        situation = str(validation.get("sit") or validation.get("ev") or "").strip()
-        if situation and situation.lower() not in {"unknown", "none"}:
-            parts.append(f"근거: {limit_text(situation, 120)}")
-        else:
-            parts.append("현재 화면과 10초 YOLO 이력 기준으로 현장 확인이 필요합니다.")
+        parts.append("현장 상황과 확산 경로 확인이 필요합니다.")
 
         return " ".join(parts)
 
@@ -200,7 +187,7 @@ class SafetyAnalysisVlm:
         return {
             "risk_level": "danger",
             "summary": f"{workplace.get('space_name')}에서 화재/연기 감지 알람이 발생했습니다.",
-            "screen_analysis": self.fallback_screen_analysis(validation),
+            "screen_analysis": self.fallback_screen_analysis(validation, workplace),
             "workplace_location": {
                 "space_id": workplace.get("space_id"),
                 "space_name": workplace.get("space_name"),
@@ -209,23 +196,23 @@ class SafetyAnalysisVlm:
             },
             "fire_cause": {
                 "cause": "원인 확인 필요",
-                "evidence": validation.get("sit") or validation.get("ev") or "YOLO fire/smoke 감지",
+                "evidence": "현재 영상 분석 결과",
                 "confidence": "low",
             },
             "spread_path": {
                 "direction": spread_direction,
                 "route": "화재/연기 주변으로 확산 가능성 확인 필요",
-                "evidence": "YOLO 10초 이력과 현재 이미지 기준",
+                "evidence": "현재 영상 분석 결과",
             },
-            "visible_people": validation.get("person") or "unknown",
-            "person_movement": validation.get("dir") or "unknown",
+            "visible_people": validation.get("person") or "확인 필요",
+            "person_movement": direction_to_korean(validation.get("dir")),
             "hazard_material": hazard_material,
             "hazard_warning": hazard_guide,
             "hazard_specific_action": hazard_guide,
             "evacuation_route": "연기와 위험물 반대 방향의 안전 구역으로 대피",
             "recommended_actions": [
-                "즉시 현장 확인 및 작업 중지",
-                "작업자를 연기와 위험물 반대 방향으로 대피 안내",
+                "관리자가 즉시 현장을 확인하고 작업을 중지합니다.",
+                "작업자를 연기 확산 반대 방향으로 대피시킵니다.",
                 hazard_guide,
             ],
             "target": {

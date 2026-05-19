@@ -106,10 +106,10 @@ class FirePipelineConfig:
         self.validation_vlm_temperature = 0.0
         self.validation_prompt_max_chars = int(_validation_prompt_max_chars)
 
-        # 최종 FirePipeline 응답은 앱 알림용 핵심 필드만 생성한다.
-        # 너무 긴 JSON 생성은 Jetson에서 지연과 파싱 실패를 유발하므로 192~256 토큰으로 제한한다.
-        self.analysis_vlm_max_tokens = min(max(int(_analysis_max_tokens), 192), 256)
+        # 최종 FirePipeline 응답은 화면 설명과 확산 방향만 짧게 생성한다.
+        # 작업장/위험물/조치 문구는 DB 기반 후처리에서 채워 지연과 파싱 실패를 줄인다.
+        self.analysis_vlm_max_tokens = min(max(int(_analysis_max_tokens), 128), 192)
         self.analysis_vlm_temperature = 0.2
-        self.analysis_prompt_max_chars = int(_analysis_prompt_max_chars)
+        self.analysis_prompt_max_chars = min(int(_analysis_prompt_max_chars), 1800)
         self.analysis_stream = True
         self.typing_fallback_delay = 0.0
