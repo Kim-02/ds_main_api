@@ -70,13 +70,9 @@ class CameraOut(BaseModel):
     is_hazard: bool = False
     is_active: bool
     is_online: bool
-    registered_at: Optional[datetime] = None
-    camera: Optional[CameraDetail] = None
-
     is_demo: bool = False
     demo_video_key: Optional[str] = None
-
-    registered_at: Optional[datetime] = None
+    registered_at: Optional[str] = None
     camera: Optional[CameraDetail] = None
 
 class FirePipelineStatus(BaseModel):

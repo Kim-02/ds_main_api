@@ -1077,7 +1077,9 @@ def _demo_camera_meta(row: dict, video_path: Path) -> dict[str, Any]:
     }
 
 
-def _serialize_datetime(value: Any) -> datetime | None:
+def _serialize_datetime(value: Any) -> str | None:
     if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    if isinstance(value, str) and value:
         return value
     return None
