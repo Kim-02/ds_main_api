@@ -120,15 +120,18 @@ class ConnectionManager:
         n = len(self.active_connections)
         logger.info("[WS] broadcasting type=%s event_id=%s clients=%d", msg_type, event_id, n)
         dead = []
+        sent = 0
         for ws in list(self.active_connections):
             try:
                 await ws.send_json(message)
+                sent += 1
                 logger.info("[WS] send ok client=%s event_id=%s", id(ws), event_id)
             except Exception as exc:
                 logger.warning("[WS] send failed client=%s event_id=%s error=%s", id(ws), event_id, exc)
                 dead.append(ws)
         for ws in dead:
             self.disconnect(ws)
+        return sent
 
 
 ws_manager = ConnectionManager()

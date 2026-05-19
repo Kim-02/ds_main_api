@@ -6,9 +6,9 @@ pipeline.running = False 로 스레드를 graceful shutdown 한다.
 import asyncio
 import logging
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from core.notifications import make_vlm_push_payload
+from core.notifications import extract_vlm_text, make_hazard_alert_ws_payload
 
 logger = logging.getLogger(__name__)
 
@@ -23,20 +23,6 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 _broadcast_fn: Optional[Callable] = None
 _db_handler = None
 
-_PUSH_EXTRA_RESERVED_KEYS = {
-    "camera_id",
-    "camera_sen_id",
-    "event_id",
-    "event_type",
-    "type",
-    "push",
-    "notification_type",
-    "title",
-    "body",
-    "text",
-    "result",
-}
-
 
 def init_manager(loop: asyncio.AbstractEventLoop, broadcast_fn: Callable, db_handler=None) -> None:
     """main.py lifespan에서 호출 — WebSocket 브로드캐스트 함수와 이벤트 루프를 주입."""
@@ -47,19 +33,33 @@ def init_manager(loop: asyncio.AbstractEventLoop, broadcast_fn: Callable, db_han
     logger.info("FirePipelineManager 초기화 완료 db_persistence=%s", bool(db_handler))
 
 
-def _save_alert_event(camera_id: int, answer: str, metadata: dict) -> int | None:
+def _alert_level(answer: Any) -> str:
+    text = str(answer or "")
+    if any(word in text for word in ("화재", "연기", "대피", "위험", "긴급", "critical", "danger")):
+        return "danger"
+    return "warning"
+
+
+def _alert_message(answer: Any) -> str:
+    return (
+        extract_vlm_text(answer)
+        or str(answer or "").strip()
+        or "CCTV 화재/연기 autoregressive VLM 분석이 완료되었습니다."
+    )
+
+
+def _save_alert_event(camera_id: int, message: str, metadata: dict, *, level: str) -> int | None:
     if _db_handler is None:
         return None
 
     try:
-        level = "danger" if any(word in str(answer) for word in ("화재", "연기", "대피", "위험")) else "warning"
         event_id = _db_handler.save_vlm_alert_event(
             space_id=metadata.get("space_id"),
             jetson_id=metadata.get("jetson_id"),
             camera_sen_id=metadata.get("sen_id") or camera_id,
             sensor_id=metadata.get("sensor_id"),
             title="CCTV 화재/연기 autoregressive VLM 분석",
-            message=str(answer or ""),
+            message=message,
             level=level,
             source="fire_pipeline",
             event_type="fire_pipeline",
@@ -76,21 +76,18 @@ def _save_alert_event(camera_id: int, answer: str, metadata: dict) -> int | None
         return None
 
 
-def _push_extra(metadata: dict) -> dict:
-    """make_vlm_push_payload의 명시 키와 충돌할 수 있는 메타데이터를 제거한다."""
-    extra = dict(metadata or {})
-    for key in _PUSH_EXTRA_RESERVED_KEYS:
-        extra.pop(key, None)
-    return extra
-
-
 async def _broadcast_payload(payload: dict, *, camera_id: int, event_id: int | None) -> None:
     if _broadcast_fn is None:
         return
 
     try:
-        await _broadcast_fn(payload)
-        logger.info("[WS] fire_pipeline broadcast success event_id=%s camera_id=%s", event_id, camera_id)
+        sent = await _broadcast_fn(payload)
+        logger.info(
+            "[WS] fire_pipeline broadcast success event_id=%s camera_id=%s sent=%s",
+            event_id,
+            camera_id,
+            sent if sent is not None else "-",
+        )
     except Exception:
         logger.exception("[WS] fire_pipeline broadcast failed event_id=%s camera_id=%s", event_id, camera_id)
 
@@ -120,7 +117,9 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
             )
             return
 
-        event_id = _save_alert_event(camera_id, answer, metadata)
+        level = _alert_level(answer)
+        message_text = _alert_message(answer)
+        event_id = _save_alert_event(camera_id, message_text, metadata, level=level)
 
         with _pipelines_lock:
             entry = _pipelines.get(camera_id)
@@ -139,15 +138,27 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
             entry["latest_event_id"] = event_id
 
         if _loop is not None and _broadcast_fn is not None:
-            extra = _push_extra(metadata)
-            payload = make_vlm_push_payload(
-                "fire_pipeline",
-                "CCTV 화재/연기 autoregressive VLM 분석 완료",
-                answer,
+            # 앱은 기존 온습도/VLM 알림과 같은 hazard_alert payload를 수신한다.
+            # FirePipeline도 같은 /ws/alerts registry와 같은 payload 모델을 사용한다.
+            payload = make_hazard_alert_ws_payload(
                 event_id=event_id,
-                camera_id=camera_id,
+                message=message_text,
+                title="CCTV 화재/연기 감지",
+                level=level,
+                space_id=metadata.get("space_id"),
+                jetson_id=metadata.get("jetson_id"),
                 camera_sen_id=metadata.get("sen_id") or camera_id,
-                **extra,
+                sensor_id=metadata.get("sensor_id"),
+                camera_name=metadata.get("sen_name") or metadata.get("camera_name") or "",
+                camera_loc=metadata.get("space_name") or metadata.get("sen_locate") or "",
+                ev_code_name="CCTV 화재/연기 감지",
+                source="fire_pipeline",
+                vibration=True,
+                led=True,
+                duration_ms=5000,
+                reset_after_ms=15000,
+                vlm_result=answer,
+                hazard_material=metadata.get("hazard_type") or "",
             )
             try:
                 asyncio.run_coroutine_threadsafe(
