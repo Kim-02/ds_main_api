@@ -1,9 +1,11 @@
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from .schemas import SensorPositionSaveReq
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/maps", tags=["map"])
 
 # ──────────────────────────────────────────────────────────────
@@ -16,11 +18,17 @@ router = APIRouter(prefix="/api/maps", tags=["map"])
 def get_floor_map_by_space(space_id: int, request: Request):
     """space_id 기준 가장 최근 평면도를 반환합니다.
 
-    Jetson이 재등록되어 jetson_id가 바뀌어도 같은 space_id면 평면도를 계속 사용할 수 있습니다.
+    floor_map.space_id 가 NULL 이면 jetson.space_id 를 통해 fallback 조회합니다.
     """
+    logger.info("[MAP] GET floor_map space_id=%s", space_id)
     floor_map = request.app.state.db.get_floor_map_by_space_id(space_id)
     if not floor_map:
+        logger.warning("[MAP] floor_map not found space_id=%s", space_id)
         raise HTTPException(status_code=404, detail="해당 공간의 평면도가 없습니다.")
+    logger.info(
+        "[MAP] floor_map found space_id=%s map_id=%s map_space_id=%s",
+        space_id, floor_map.get("map_id"), floor_map.get("space_id"),
+    )
     return {"status": "success", "data": floor_map}
 
 
@@ -30,11 +38,16 @@ def get_available_cctvs_by_space(
     request: Request,
     map_id: Optional[int] = Query(None, description="배치 여부(placed)를 확인할 map_id"),
 ):
-    """space_id에 속한 CCTV 목록을 반환합니다.
+    """space_id에 속한 CCTV 목록을 반환합니다. demo_camera 포함.
 
     map_id를 함께 전달하면 각 CCTV의 배치 여부(placed)와 현재 좌표도 반환합니다.
     """
+    logger.info("[MAP_CCTV] available-cctvs space_id=%s map_id=%s", space_id, map_id)
     cctvs = request.app.state.db.get_available_cctvs_for_map(space_id, map_id=map_id)
+    logger.info(
+        "[MAP_CCTV] available-cctvs result space_id=%s map_id=%s count=%s items=%s",
+        space_id, map_id, len(cctvs) if cctvs else 0, cctvs,
+    )
     return {"status": "success", "data": cctvs}
 
 
@@ -102,12 +115,31 @@ def save_sensor_position(req: SensorPositionSaveReq, request: Request):
 
 @router.get("/{map_id}/sensors", summary="평면도 센서 위치 조회 (map_id 기준)")
 def get_map_sensor_positions(map_id: int, request: Request):
-    """map_id 기준 배치된 센서 위치 목록을 반환합니다."""
+    """map_id 기준 배치된 센서 위치 목록을 반환합니다. is_demo, demo_video_key 포함."""
+    logger.info("[MAP] GET sensor_positions map_id=%s", map_id)
     floor_map = request.app.state.db.get_floor_map_by_map_id(map_id)
     if not floor_map:
         raise HTTPException(status_code=404, detail="해당 map_id의 평면도가 없습니다.")
 
     positions = request.app.state.db.get_sensor_positions_by_map_id(map_id)
+
+    # is_demo=True인 경우 stream_url 에 demo 식별자 주입
+    for pos in positions:
+        is_demo = bool(pos.get("is_demo"))
+        demo_key = pos.get("demo_video_key") or ""
+        pos["is_camera"] = bool(
+            pos.get("sensor_type") and (
+                "camera" in str(pos["sensor_type"]).lower()
+                or "cctv" in str(pos["sensor_type"]).lower()
+            )
+        )
+        pos["is_demo"] = is_demo
+        if is_demo:
+            pos["stream_url"] = f"demo://{demo_key}"
+        else:
+            pos["stream_url"] = None
+
+    logger.info("[MAP] sensor_positions map_id=%s count=%s", map_id, len(positions))
     return {"status": "success", "data": positions}
 
 
