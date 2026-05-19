@@ -343,14 +343,21 @@ async def lifespan(app: FastAPI):
 
         def _on_vlm_result(text: str):
             import asyncio
-            from core.notifications import make_vlm_push_payload
+            from core.notifications import make_hazard_alert_ws_payload
 
             asyncio.run_coroutine_threadsafe(
-                ws_manager.broadcast(make_vlm_push_payload(
-                    "vlm_analysis",
-                    "CCTV autoregressive VLM 분석 완료",
-                    text,
-                )),
+                ws_manager.broadcast(
+                    make_hazard_alert_ws_payload(
+                        event_id=None,
+                        message=text or "CCTV autoregressive VLM 분석이 완료되었습니다.",
+                        title="CCTV autoregressive VLM 분석 완료",
+                        level="info",
+                        source="vlm_analysis",
+                        vibration=False,
+                        led=False,
+                        vlm_result=text,
+                    )
+                ),
                 main_loop,
             )
 

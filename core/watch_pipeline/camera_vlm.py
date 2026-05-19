@@ -21,7 +21,7 @@ from core.cctv_vlm_context import (
     build_yolo_normalized_context_from_frames,
     public_yolo_context,
 )
-from core.notifications import extract_vlm_text, make_vlm_push_payload
+from core.notifications import extract_vlm_text, make_hazard_alert_ws_payload, make_vlm_push_payload
 from core.vlm_prompt_builder import (
     build_common_autoregressive_vlm_prompt as shared_build_common_autoregressive_vlm_prompt,
     build_retry_prompt as shared_build_retry_prompt,
@@ -177,7 +177,99 @@ class WatchCameraVlmManager:
     def publish_result(self, payload: dict) -> None:
         if self._loop is None or self._broadcast_fn is None:
             return
-        asyncio.run_coroutine_threadsafe(self._broadcast_fn(payload), self._loop)
+
+        app_payload = self._make_app_alert_payload(payload)
+        asyncio.run_coroutine_threadsafe(self._broadcast_fn(app_payload), self._loop)
+
+    def _make_app_alert_payload(self, payload: dict) -> dict:
+        """워치/밴드 기반 VLM 결과도 앱의 hazard_alert 형식으로 통일한다."""
+        result = payload.get("result")
+        camera = payload.get("camera") or {}
+        status = payload.get("status") or {}
+        last_trigger = status.get("last_trigger") or {}
+        prediction = last_trigger.get("prediction") if isinstance(last_trigger, dict) else {}
+        prediction = prediction if isinstance(prediction, dict) else {}
+        worker = prediction.get("worker") if isinstance(prediction.get("worker"), dict) else {}
+        text = (
+            extract_vlm_text(result)
+            or payload.get("text")
+            or payload.get("body")
+            or "워치/밴드 기반 autoregressive VLM 분석이 완료되었습니다."
+        )
+        level = _watch_alert_level(result, prediction)
+        title = "작업자 위험 감지" if level == "danger" else "작업자 주의 감지"
+        camera_sen_id = _to_int(camera.get("sen_id"))
+        space_id = _to_int(camera.get("space_id"))
+        sensor_id = last_trigger.get("watch_sensor_id") if isinstance(last_trigger, dict) else None
+        event_id = self._save_alert_event(
+            space_id=space_id,
+            camera_sen_id=camera_sen_id,
+            sensor_id=sensor_id,
+            title=title,
+            message=text,
+            level=level,
+        )
+
+        logger.info(
+            "[VLM_ALERT] watch_camera_vlm saved event_id=%s space_id=%s camera_sen_id=%s sensor_id=%s level=%s",
+            event_id,
+            space_id,
+            camera_sen_id,
+            sensor_id,
+            level,
+        )
+
+        return make_hazard_alert_ws_payload(
+            event_id=event_id,
+            message=text,
+            title=title,
+            level=level,
+            space_id=space_id,
+            camera_sen_id=camera_sen_id,
+            sensor_id=sensor_id,
+            camera_name=camera.get("sen_name") or camera.get("camera_name") or "",
+            camera_loc=camera.get("space_name") or camera.get("sen_locate") or "",
+            ev_code_name="워치/밴드 기반 CCTV VLM 분석",
+            source="watch_camera_vlm",
+            vibration=level in {"warning", "danger"},
+            led=level in {"warning", "danger"},
+            duration_ms=5000 if level == "danger" else 3000,
+            reset_after_ms=15000,
+            vlm_result=result,
+            hazard_material=_result_value(result, "hazard_material", camera.get("hazard_type") or ""),
+            hazard_warning=_result_value(result, "hazard_warning", ""),
+            hazard_specific_action=_result_value(result, "hazard_specific_action", ""),
+            evacuation_route=_result_value(result, "evacuation_route", ""),
+            abnormal_behavior=_result_value(result, "abnormal_behavior", ""),
+            detection_info=_as_dict(_result_value(result, "detection_info", {})),
+            person_movement=_as_dict(_result_value(result, "person_movement", {})),
+            environment_detections=_as_dict(_result_value(result, "environment_detections", {})),
+        )
+
+    def _save_alert_event(
+        self,
+        *,
+        space_id: int | None,
+        camera_sen_id: int | None,
+        sensor_id: str | None,
+        title: str,
+        message: str,
+        level: str,
+    ) -> int | None:
+        try:
+            return self._db_handler.save_vlm_alert_event(
+                space_id=space_id,
+                camera_sen_id=camera_sen_id,
+                sensor_id=sensor_id,
+                title=title,
+                message=message,
+                level=level,
+                source="watch_camera_vlm",
+                event_type="watch_camera_vlm",
+            )
+        except Exception as exc:
+            logger.exception("[VLM_ALERT] watch_camera_vlm DB save failed: %s", exc)
+            return None
 
 
 class WatchCameraVlmSession:
@@ -1088,6 +1180,42 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return False
+
+
+def _as_dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _result_value(result: Any, key: str, default: Any = "") -> Any:
+    if isinstance(result, dict):
+        value = result.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _watch_alert_level(result: Any, prediction: dict | None = None) -> str:
+    prediction = prediction if isinstance(prediction, dict) else {}
+    risk_level = str(_result_value(result, "risk_level", "") or "").strip().lower()
+    rest_result = str(prediction.get("result") or _result_value(result, "rest_recommendation", "") or "")
+    abnormal = str(_result_value(result, "abnormal_behavior", "") or "").strip().lower()
+
+    if risk_level in {"critical", "high"} or "강한" in rest_result or "반드시" in rest_result:
+        return "danger"
+    if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
+        return "danger"
+    if risk_level in {"medium", "warning"} or "약한" in rest_result:
+        return "warning"
+    return "info"
 
 
 def _compact_camera_for_prompt(camera: dict) -> dict:
