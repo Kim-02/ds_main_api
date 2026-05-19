@@ -4,6 +4,7 @@
 pipeline.running = False 로 스레드를 graceful shutdown 한다.
 """
 import asyncio
+import json
 import logging
 import threading
 from typing import Any, Callable, Optional
@@ -96,6 +97,16 @@ def _answer_dict(answer: Any, key: str) -> dict:
     return {}
 
 
+def _json_preview(value: Any, max_chars: int = 2000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "...[truncated]"
+
+
 def _metadata_from_db_row(row: dict | None, fallback: dict | None = None) -> dict:
     fallback = dict(fallback or {})
     if not row:
@@ -165,8 +176,14 @@ async def _broadcast_payload(payload: dict, *, camera_id: int, event_id: int | N
 
     try:
         sent = await _broadcast_fn(payload)
+        if not sent:
+            logger.warning(
+                "[APP_PUSH_WARN] no websocket clients sent event_id=%s camera_id=%s path=/ws/alerts",
+                event_id,
+                camera_id,
+            )
         logger.info(
-            "[WS] fire_pipeline broadcast success event_id=%s camera_id=%s sent=%s",
+            "[APP_PUSH] fire_pipeline send success event_id=%s camera_id=%s sent=%s",
             event_id,
             camera_id,
             sent if sent is not None else "-",
@@ -257,6 +274,14 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
                     "summary": _answer_value(answer, "person_movement", ""),
                 },
             )
+            logger.info(
+                "[APP_PUSH] fire_pipeline send start event_id=%s camera_id=%s space_id=%s type=%s",
+                event_id,
+                camera_id,
+                current_metadata.get("space_id"),
+                payload.get("type"),
+            )
+            logger.info("[APP_PUSH_PAYLOAD_RAW] %s", _json_preview(payload))
             try:
                 asyncio.run_coroutine_threadsafe(
                     _broadcast_payload(payload, camera_id=camera_id, event_id=event_id),

@@ -85,7 +85,10 @@ class OpenAiCompatibleVlm:
             self.client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
-                timeout=self.timeout
+                timeout=self.timeout,
+                # FirePipeline은 실시간 알림 파이프라인이므로 OpenAI SDK 내부 재시도로
+                # 30초 타임아웃이 90초 이상 늘어나는 상황을 피한다.
+                max_retries=0,
             )
         else:
             self.client = client

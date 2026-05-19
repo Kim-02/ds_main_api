@@ -3,10 +3,13 @@
 이미지 + YOLO 이력 + 작업장 DB 메타데이터를 입력받아 앱 알림용 JSON을 생성한다.
 """
 import json
+import logging
 import time
 
 from core.vlm_prompt_builder import hazard_response_guide
 from cctv.fire_pipeline.vlm_client import OpenAiCompatibleVlm, extract_json
+
+logger = logging.getLogger(__name__)
 
 
 def limit_text(text, max_chars):
@@ -272,6 +275,13 @@ class SafetyAnalysisVlm:
 
     def analyze(self, normalized_text, validation, image_path, on_text=None, workplace_info=None):
         prompt = self.make_prompt(normalized_text, validation, workplace_info)
+        logger.info(
+            "[FirePipeline] final VLM prompt prepared chars=%s max_tokens=%s timeout=%s image=%s",
+            len(prompt),
+            self.config.analysis_vlm_max_tokens,
+            self.config.vllm_timeout,
+            image_path,
+        )
 
         try:
             raw = self.client.request_text(
@@ -282,20 +292,25 @@ class SafetyAnalysisVlm:
                 False,
                 on_text
             )
-        except Exception:
-            raw = self.client.request_text(
-                prompt,
-                image_path,
-                self.config.analysis_vlm_max_tokens,
-                self.config.analysis_vlm_temperature,
-                False,
-                None
+        except Exception as exc:
+            logger.exception(
+                "[FirePipeline] final VLM request failed; fallback alert will be emitted error=%s",
+                exc,
             )
-            self.emit_typing_text(raw, on_text)
+            return self.fallback_response(
+                "최종 autoregressive VLM 응답 시간 초과 또는 실패. YOLO fire/smoke 감지와 검증 결과를 기준으로 알림을 생성했습니다.",
+                validation,
+                workplace_info,
+            )
 
         try:
             parsed = extract_json(raw)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[FirePipeline] final VLM JSON parse failed; normalized fallback fields will be used raw_len=%s error=%s",
+                len(str(raw or "")),
+                exc,
+            )
             parsed = {}
 
         return self.normalize_response(parsed, raw, validation, workplace_info)

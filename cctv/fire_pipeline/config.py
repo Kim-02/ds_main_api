@@ -106,8 +106,9 @@ class FirePipelineConfig:
         self.validation_vlm_temperature = 0.0
         self.validation_prompt_max_chars = int(_validation_prompt_max_chars)
 
-        # FirePipeline은 앱 알림용 JSON을 받아야 하므로 .env가 128로 낮아도 최소 512 토큰은 확보한다.
-        self.analysis_vlm_max_tokens = max(int(_analysis_max_tokens), 512)
+        # FirePipeline은 앱 알림용 JSON을 받아야 하므로 .env가 128로 낮아도 최소 토큰은 확보한다.
+        # Jetson 실시간 알림에서는 너무 긴 출력이 timeout을 유발할 수 있어 기본 하한은 384로 둔다.
+        self.analysis_vlm_max_tokens = max(int(_analysis_max_tokens), 384)
         self.analysis_vlm_temperature = 0.2
         self.analysis_prompt_max_chars = int(_analysis_prompt_max_chars)
         self.analysis_stream = True
