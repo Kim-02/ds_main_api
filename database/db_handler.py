@@ -2350,7 +2350,7 @@ class DatabaseHandler:
         같은 space_id + demo_video_key 조합이 이미 있으면 기존 항목을 반환한다.
         """
         sensor_id = f"demo-camera-{demo_video_key}-space-{space_id}"
-        ip_address = f"demo://{demo_video_key}"
+        ip_address = "vr"
 
         try:
             with self._get_connection() as conn:
@@ -2401,11 +2401,11 @@ class DatabaseHandler:
                                 sen_id, ip_address, camera_id, camera_pw,
                                 health, space_id, is_demo, demo_video_key
                             ) VALUES (
-                                %s, %s, %s, NULL,
+                                %s, %s, %s, %s,
                                 1, %s, 1, %s
                             )
                             """,
-                            (new_sen_id, ip_address, demo_video_key, space_id, demo_video_key),
+                            (new_sen_id, ip_address, "vr", "vr", space_id, demo_video_key),
                         )
 
                     conn.commit()
