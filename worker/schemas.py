@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class WorkerCreate(BaseModel):
@@ -42,9 +42,60 @@ class WorkerDbOut(BaseModel):
 
 
 class AssignHeartBandRequest(BaseModel):
-    sensor_id: str
-    jetson_id: Optional[int] = None
+    model_config = ConfigDict(extra="allow")
+
+    sensor_id: Optional[str] = None
+    dept_id: Optional[int] = None
+    jetson_id: Optional[int | str] = None
     interval_ms: int = 5000
+    sensor_type: Optional[str] = None
+    sen_name: Optional[str] = None
+    sen_locate: Optional[str] = None
+    model: Optional[str] = None
+    mqtt_topic: Optional[str] = None
+    telemetry_topic: Optional[str] = None
+    mqtt_base: Optional[str] = None
+    mdns_hostname: Optional[str] = None
+    ip_addr: Optional[str] = None
+    is_online: Optional[bool] = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_app_payload(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+        nested = normalized.get("sensor") or normalized.get("watch") or normalized.get("device")
+        if isinstance(nested, dict):
+            for key, value in nested.items():
+                normalized.setdefault(key, value)
+
+        aliases = {
+            "sensor_id": ("sensorId", "watch_id", "watchId", "watchSensorId", "device_id", "deviceId", "band_id", "bandId"),
+            "dept_id": ("deptId", "worker_id", "workerId", "employee_id", "employeeId"),
+            "jetson_id": ("jetsonId",),
+            "interval_ms": ("intervalMs", "interval", "intervalMillis"),
+            "sensor_type": ("sensorType", "type"),
+            "sen_name": ("sensor_name", "sensorName", "name", "watchName"),
+            "sen_locate": ("sensor_location", "sensorLocation", "location", "watchLocation"),
+            "mqtt_topic": ("mqttTopic",),
+            "telemetry_topic": ("telemetryTopic",),
+            "mqtt_base": ("mqttBase",),
+            "mdns_hostname": ("mdnsHostname",),
+            "ip_addr": ("ipAddr", "ipAddress"),
+            "is_online": ("isOnline",),
+        }
+        for target, source_names in aliases.items():
+            if normalized.get(target) not in (None, ""):
+                continue
+            for source_name in source_names:
+                value = normalized.get(source_name)
+                if value not in (None, ""):
+                    normalized[target] = value
+                    break
+
+        return normalized
 
 
 class AssignHeartBandResponse(BaseModel):

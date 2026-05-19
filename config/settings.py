@@ -23,10 +23,10 @@ class Settings(BaseSettings):
     vllm_host: str = "0.0.0.0"
     vllm_port: int = 1111
     vllm_dtype: str = "float16"
-    vllm_gpu_memory_utilization: float = 0.5
+    vllm_gpu_memory_utilization: float = 0.7
     vllm_max_model_len: int = 4096
     vllm_max_num_seqs: int = 4
-    vllm_max_num_batched_tokens: int = 4096
+    vllm_max_num_batched_tokens: int = 8192
     vllm_limit_mm_per_prompt: str = "image=1,video=0"
     vllm_startup_timeout_seconds: int = 600
     vllm_startup_poll_seconds: float = 3.0
@@ -46,14 +46,14 @@ class Settings(BaseSettings):
     yolo_warmup_on_startup: bool = True
     cctv_rtsp_url: str = ""
     cctv_vlm_yolo_context_seconds: float = 10.0
-    cctv_vlm_yolo_context_max_frames: int = 20
+    cctv_vlm_yolo_context_max_frames: int = 10
     cctv_vlm_yolo_context_frame_dir: str = "cctv_vlm_yolo_frames"
     cctv_vlm_yolo_context_saved_frames_keep_count: int = 240
     cctv_vlm_yolo_context_prompt_max_chars: int = 420
     cctv_vlm_request_image_max_side: int = 512
 
     # Fire pipeline (CCTV 화재 감지 전용)
-    fire_pipeline_enabled: bool = True
+    fire_pipeline_enabled: bool = False
     fire_pipeline_yolo_model_path: str = "0507_best.engine"
     fire_pipeline_vllm_base_url: str = ""
     fire_pipeline_vllm_model: str = ""
@@ -87,10 +87,10 @@ class Settings(BaseSettings):
     watch_alert_reset_after_ms: int = 5000
     watch_camera_vlm_session_seconds: int = 120
     watch_camera_vlm_analysis_interval_seconds: int = 30
-    camera_vlm_request_timeout_seconds: int = 30
-    camera_vlm_prompt_max_chars: int = 2400
+    camera_vlm_request_timeout_seconds: int = 90
+    camera_vlm_prompt_max_chars: int = 5600
     camera_vlm_retry_prompt_max_chars: int = 1100
-    camera_vlm_max_tokens: int = 384
+    camera_vlm_max_tokens: int = 256
     rest_forced_rest_work_minutes: int = 120
     rest_default_age: int = 40
     rest_default_gender: int = 1
@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     debug: bool = False
-    log_profile: str = "vlm_focus"
+    log_profile: str = "default"
 
     @field_validator("debug", mode="before")
     @classmethod

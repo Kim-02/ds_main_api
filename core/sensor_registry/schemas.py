@@ -11,8 +11,11 @@ class SensorInfo(BaseModel):
     sen_locate: Optional[str] = None
     model: Optional[str] = "unknown"
     mqtt_topic: Optional[str] = None
+    telemetry_topic: Optional[str] = None
+    mqtt_base: Optional[str] = None
     mdns_hostname: Optional[str] = None
     ip_addr: Optional[str] = None
+    is_online: Optional[bool] = True
     last_seen_at: Optional[Any] = None
 
 
@@ -23,3 +26,9 @@ class SensorRegisterReq(BaseModel):
 
 class SensorUnregisterReq(BaseModel):
     sensor_id: str
+
+
+class WorkerWatchRegisterReq(BaseModel):
+    jetson_id: str | int
+    dept_id: int
+    sensor: SensorInfo

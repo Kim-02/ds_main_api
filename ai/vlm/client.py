@@ -82,15 +82,28 @@ class OpenAiCompatibleVlm:
         else:
             self.client = client
 
-    def request_text(self, prompt, image_path="", max_tokens=256, temperature=0.2, stream=False, on_text=None):
+    def request_text(
+        self,
+        prompt,
+        image_path="",
+        max_tokens=256,
+        temperature=0.2,
+        stream=False,
+        on_text=None,
+        system_prompt=None,
+    ):
         label = _make_timeshare_label(self.model, image_path, stream)
 
         def _request():
             content = make_content(prompt, image_path)
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": content})
 
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": content}],
+                messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 stream=stream,

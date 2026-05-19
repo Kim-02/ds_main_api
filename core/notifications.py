@@ -103,28 +103,134 @@ def extract_vlm_text(result: Any) -> str:
         return result.strip()
 
     if isinstance(result, dict):
-        parts = []
-        for key in (
-            "summary",
-            "hazard_warning",
-            "hazard_specific_action",
-            "evacuation_route",
-            "abnormal_behavior",
-            "detection_text",
-            "recommended_action",
-            "situation",
-            "evidence",
-            "raw_text",
-            "text",
-        ):
-            value = result.get(key)
-            if value:
-                parts.append(str(value).strip())
-        if parts:
-            return " / ".join(parts)
-        return json.dumps(result, ensure_ascii=False, default=str)
+        target_type = (result.get("target") or {}).get("type") if isinstance(result.get("target"), dict) else None
+
+        if target_type == "site":
+            return _extract_site_vlm_text(result)
+        if target_type == "worker":
+            return _extract_worker_vlm_text(result)
+
+        if result:
+            return json.dumps(result, ensure_ascii=False, default=str)
+        return ""
 
     if isinstance(result, list):
         return json.dumps(result, ensure_ascii=False, default=str)
 
     return str(result)
+
+
+def _extract_site_vlm_text(result: dict) -> str:
+    """environment(site) 모드 VLM 결과를 관리자 알림 텍스트로 변환한다."""
+    parts = []
+    summary = str(result.get("summary") or "").strip()
+    field_status = str(result.get("field_status") or "").strip()
+    worker_movements = str(result.get("worker_movements") or "").strip()
+    health_risk_summary = str(result.get("health_risk_summary") or "").strip()
+    recommended_actions = result.get("recommended_actions")
+
+    if summary:
+        parts.append(f"[현장] {summary}")
+    if field_status and field_status != summary:
+        parts.append(f"현장 상태: {field_status}")
+    if worker_movements and worker_movements not in {"none", "unknown"}:
+        parts.append(f"작업자 동향: {worker_movements}")
+    if health_risk_summary:
+        parts.append(f"건강 위험: {health_risk_summary}")
+    if isinstance(recommended_actions, list):
+        for action in recommended_actions[:2]:
+            text = _action_text(action)
+            if text:
+                parts.append(f"조치: {text}")
+
+    return " | ".join(parts) if parts else ""
+
+
+def _extract_worker_vlm_text(result: dict) -> str:
+    """worker_regression 모드 VLM 결과를 관리자 알림 텍스트로 변환한다."""
+    parts = []
+    target = result.get("target") or {}
+    worker_name = str(target.get("worker_name") or "").strip()
+    rest_rec = str(result.get("rest_recommendation") or "").strip()
+    summary = str(result.get("summary") or "").strip()
+    health = str(result.get("health_considerations") or "").strip()
+    abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
+    recommended_actions = result.get("recommended_actions") or []
+
+    behavior_obs = result.get("behavior_observation") if isinstance(result.get("behavior_observation"), dict) else {}
+    obs_detail = str(behavior_obs.get("detail") or "").strip()
+    _default_obs = "화면에서 자세·이동 패턴을 확인할 수 없습니다."
+
+    # ① CCTV 행동 관찰
+    if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
+        label = {
+            "staggering": "비틀거림 감지",
+            "falling": "낙상 감지",
+            "slumping": "신체 축 처짐 감지",
+            "leaning": "기댐 감지",
+            "crouching": "쭈그림 감지",
+        }.get(abnormal, abnormal)
+        detail_suffix = f" — {obs_detail}" if obs_detail and obs_detail != _default_obs else ""
+        parts.append(f"[행동 이상] {label}{detail_suffix}")
+    elif abnormal == "normal":
+        obs_text = obs_detail if (obs_detail and obs_detail != _default_obs) else "정상 자세 확인"
+        parts.append(f"화면: {obs_text}")
+    elif abnormal in {"not_visible", "unknown"}:
+        parts.append("화면: 작업자 위치 미확인")
+
+    # ② 작업자명 + 휴식 권고 레벨
+    rest_label = _rest_recommendation_label(rest_rec) or _rest_recommendation_label(summary)
+    header = f"[{worker_name}] {rest_label}" if worker_name and rest_label else (summary or rest_label)
+    if header:
+        parts.append(header)
+
+    # ③ 건강 위험 요인 (라벨 제거하고 값만)
+    risk_text = _risk_factors_from_health_text(health)
+    if risk_text:
+        parts.append(f"위험요인: {risk_text}")
+
+    # ④ 조치 (중복 제거, dict 평탄화, 최대 2개)
+    seen: set[str] = set()
+    action_count = 0
+    for action in recommended_actions:
+        text = _action_text(action)
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(f"조치: {text}")
+            action_count += 1
+            if action_count >= 2:
+                break
+
+    return " | ".join(parts) if parts else summary
+
+
+def _rest_recommendation_label(text: str) -> str:
+    if not text:
+        return ""
+    if "반드시" in text:
+        return "즉시 휴식 필요"
+    if "강한" in text:
+        return "강한 휴식 권고"
+    if "약한" in text:
+        return "약한 휴식 권고"
+    return ""
+
+
+def _risk_factors_from_health_text(health: str) -> str:
+    """'등록 건강 유의요인: 고령, 고혈압' → '고령, 고혈압'"""
+    for separator in (":", "："):
+        if separator in health:
+            return health.split(separator, 1)[-1].strip()
+    return health.strip() if health else ""
+
+
+def _action_text(action: Any) -> str:
+    if isinstance(action, str):
+        return action.strip()
+    if isinstance(action, dict):
+        for key in ("action", "description", "text", "content", "message"):
+            val = action.get(key)
+            if val and isinstance(val, str):
+                return val.strip()
+        return " ".join(str(v) for v in action.values() if v).strip()
+    return str(action).strip() if action else ""
