@@ -186,6 +186,17 @@ class ExportFinalPipeline:
                         self.config.video_source,
                         status,
                     )
+                    if (
+                        status.get("latest_error") == "buffer_not_started"
+                        and self._is_local_video_source()
+                    ):
+                        logger.warning(
+                            "[FirePipeline] frame buffer not started for local video; "
+                            "fallback to direct capture camera_id=%s source=%s",
+                            camera_id,
+                            self.config.video_source,
+                        )
+                        return False
                     last_empty_log_time = current_monotonic
 
                 time.sleep(self.config.buffer_empty_sleep_seconds)
@@ -213,6 +224,12 @@ class ExportFinalPipeline:
             time.sleep(self.config.buffer_duplicate_sleep_seconds)
 
         return True
+
+    def _is_local_video_source(self):
+        source = str(self.config.video_source or "")
+        if source.startswith("rtsp://"):
+            return False
+        return os.path.isfile(source)
 
     def set_latest_summary(self, summary):
         with self.latest_lock:

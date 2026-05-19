@@ -74,16 +74,17 @@ def start_registered_camera_runtime_components(
 
     for row in rows:
         if row.get("is_demo"):
-            # 시연용 CCTV는 RTSP 없이 video 파일로 fire pipeline만 시작
+            # 시연용 CCTV는 RTSP 대신 로컬 video 파일로 reader/buffer/fire pipeline을 복구
             demo_video_key = row.get("demo_video_key") or "scenario3_fire"
             relative_path = DEMO_VIDEO_MAP.get(demo_video_key)
             video_path = (Path.cwd() / relative_path).resolve() if relative_path else None
             if video_path and video_path.exists():
                 try:
-                    from cctv.fire_pipeline import manager as fire_manager
-                    fire_manager.start_pipeline(
-                        camera_id=int(row["sen_id"]),
+                    _start_runtime_components(
+                        cam_id=int(row["sen_id"]),
                         rtsp_url=str(video_path),
+                        process_id=int(row.get("space_id") or 0),
+                        camera_meta=_demo_camera_meta(row, video_path),
                     )
                     started += 1
                     status_str = "started_demo"
@@ -699,14 +700,15 @@ def register_demo_camera(
         video_path = (Path.cwd() / relative_path).resolve()
         if video_path.exists():
             try:
-                from cctv.fire_pipeline import manager as fire_manager
-                fire_manager.start_pipeline(
-                    camera_id=int(sen_id),
+                _start_runtime_components(
+                    cam_id=int(sen_id),
                     rtsp_url=str(video_path),
+                    process_id=int(data.space_id),
+                    camera_meta=_demo_camera_meta(result, video_path),
                 )
-                logger.info("Demo CCTV fire pipeline started sen_id=%s video=%s", sen_id, video_path)
+                logger.info("Demo CCTV runtime started sen_id=%s video=%s", sen_id, video_path)
             except Exception as exc:
-                logger.warning("Demo CCTV fire pipeline 시작 실패 sen_id=%s: %s", sen_id, exc)
+                logger.warning("Demo CCTV runtime 시작 실패 sen_id=%s: %s", sen_id, exc)
         else:
             logger.warning(
                 "Demo CCTV 영상 파일 없음 — fire pipeline 미시작 sen_id=%s path=%s",
@@ -769,12 +771,12 @@ def analyze_demo_camera(
     import uuid
     scenario_id = str(uuid.uuid4())
 
-    ok = fire_manager.start_pipeline(
-        camera_id=camera_sen_id,
+    _start_runtime_components(
+        cam_id=int(camera_sen_id),
         rtsp_url=str(video_path),
+        process_id=int(row.get("space_id") or 0),
+        camera_meta=_demo_camera_meta(row, video_path),
     )
-    if not ok:
-        logger.warning("Demo analyze pipeline already running camera_sen_id=%s", camera_sen_id)
 
     logger.info(
         "Demo VLM analysis started camera_sen_id=%s video_path=%s scenario_id=%s",
@@ -864,6 +866,28 @@ def _row_to_camera_out(row: dict) -> dict:
             "camera_id": row.get("camera_id"),
             "health": bool(row.get("health")),
         },
+    }
+
+
+def _demo_camera_meta(row: dict, video_path: Path) -> dict[str, Any]:
+    """Fire/VLM 알림에 실을 demo CCTV 메타데이터를 만든다."""
+    space_id = row.get("space_id")
+    return {
+        "sen_id": int(row.get("sen_id") or row.get("id") or 0),
+        "sensor_id": row.get("sensor_id"),
+        "sen_name": row.get("sen_name") or row.get("name") or f"DEMO-{video_path.stem}",
+        "space_id": int(space_id) if space_id is not None else None,
+        "space_name": row.get("space_name"),
+        "hazard_type": row.get("hazard_type"),
+        "is_hazard": bool(row.get("is_hazard", False)),
+        "is_demo": True,
+        "demo_video_key": row.get("demo_video_key"),
+        "ip_address": "vr",
+        "camera_id": "vr",
+        "camera_pw": "",
+        "rtsp_url": str(video_path),
+        "video_path": str(video_path),
+        "source_type": "demo_video_file",
     }
 
 
