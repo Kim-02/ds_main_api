@@ -71,15 +71,49 @@ def start_registered_camera_runtime_components(
     started = 0
     failed = 0
     cameras = []
+    latest_demo_by_key: dict[tuple[int, str], dict] = {}
+
+    for row in rows:
+        if not row.get("is_demo"):
+            continue
+        demo_key = _demo_runtime_key(row)
+        current = latest_demo_by_key.get(demo_key)
+        if current is None or int(row.get("sen_id") or 0) > int(current.get("sen_id") or 0):
+            latest_demo_by_key[demo_key] = row
 
     for row in rows:
         if row.get("is_demo"):
             # 시연용 CCTV는 RTSP 대신 로컬 video 파일로 reader/buffer/fire pipeline을 복구
             demo_video_key = row.get("demo_video_key") or "scenario3_fire"
+            demo_key = _demo_runtime_key(row)
+            latest_demo = latest_demo_by_key.get(demo_key)
+            if latest_demo is not None and int(latest_demo.get("sen_id") or 0) != int(row.get("sen_id") or 0):
+                _stop_runtime_components(int(row["sen_id"]))
+                cameras.append({
+                    "sensor_id": row.get("sensor_id"),
+                    "sen_id": row.get("sen_id"),
+                    "camera_id": row.get("sen_id"),
+                    "status": "skipped_duplicate_demo",
+                })
+                logger.info(
+                    "Existing duplicate demo runtime stopped camera_id=%s keep_camera_id=%s key=%s",
+                    row.get("sen_id"),
+                    latest_demo.get("sen_id"),
+                    demo_key,
+                )
+                continue
+
             relative_path = DEMO_VIDEO_MAP.get(demo_video_key)
             video_path = (Path.cwd() / relative_path).resolve() if relative_path else None
             if video_path and video_path.exists():
                 try:
+                    _stop_stale_demo_runtimes(
+                        db,
+                        int(row.get("space_id") or 0),
+                        demo_video_key,
+                        video_path,
+                        keep_camera_id=int(row["sen_id"]),
+                    )
                     _start_runtime_components(
                         cam_id=int(row["sen_id"]),
                         rtsp_url=str(video_path),
@@ -689,8 +723,10 @@ def register_demo_camera(
         )
 
     sen_id = result.get("sen_id")
+    reused = bool(result.get("reused"))
     logger.info(
-        "Demo CCTV registered space_id=%s jetson_id=%s demo_video_key=%s sen_id=%s",
+        "Demo CCTV %s space_id=%s jetson_id=%s demo_video_key=%s sen_id=%s",
+        "reused" if reused else "registered",
         data.space_id, jetson_id, data.demo_video_key, sen_id,
     )
 
@@ -700,6 +736,13 @@ def register_demo_camera(
         video_path = (Path.cwd() / relative_path).resolve()
         if video_path.exists():
             try:
+                _stop_stale_demo_runtimes(
+                    db,
+                    int(data.space_id),
+                    data.demo_video_key,
+                    video_path,
+                    keep_camera_id=int(sen_id),
+                )
                 _start_runtime_components(
                     cam_id=int(sen_id),
                     rtsp_url=str(video_path),
@@ -771,6 +814,13 @@ def analyze_demo_camera(
     import uuid
     scenario_id = str(uuid.uuid4())
 
+    _stop_stale_demo_runtimes(
+        db,
+        int(row.get("space_id") or 0),
+        demo_video_key,
+        video_path,
+        keep_camera_id=int(camera_sen_id),
+    )
     _start_runtime_components(
         cam_id=int(camera_sen_id),
         rtsp_url=str(video_path),
@@ -867,6 +917,95 @@ def _row_to_camera_out(row: dict) -> dict:
             "health": bool(row.get("health")),
         },
     }
+
+
+def _demo_runtime_key(row: dict) -> tuple[int, str]:
+    return (
+        int(row.get("space_id") or 0),
+        str(row.get("demo_video_key") or "scenario3_fire"),
+    )
+
+
+def _stop_stale_demo_runtimes(
+    db: DatabaseHandler,
+    space_id: int,
+    demo_video_key: str,
+    video_path: Path,
+    *,
+    keep_camera_id: int,
+) -> None:
+    """같은 demo video/source를 물고 있는 이전 reader/buffer/fire runtime을 정리한다."""
+    stopped: set[int] = set()
+    db_rows: list[dict] = []
+    all_db_camera_ids: set[int] = set()
+    same_demo_camera_ids: set[int] = set()
+
+    try:
+        db_rows = db.get_cctv_list()
+        for row in db_rows:
+            camera_id = int(row.get("sen_id") or 0)
+            if camera_id <= 0:
+                continue
+            all_db_camera_ids.add(camera_id)
+            if not row.get("is_demo"):
+                continue
+            if int(row.get("space_id") or 0) != int(space_id):
+                continue
+            if str(row.get("demo_video_key") or "scenario3_fire") != str(demo_video_key):
+                continue
+            same_demo_camera_ids.add(camera_id)
+    except Exception as exc:
+        logger.warning("기존 demo DB 목록 조회 실패 keep_camera_id=%s: %s", keep_camera_id, exc)
+
+    try:
+        from cctv.rtsp import get_reader_sources
+
+        for camera_id, source in get_reader_sources().items():
+            if int(camera_id) == int(keep_camera_id):
+                continue
+            if int(camera_id) in all_db_camera_ids and int(camera_id) not in same_demo_camera_ids:
+                continue
+            if _same_local_source(source, video_path):
+                _stop_runtime_components(int(camera_id))
+                stopped.add(int(camera_id))
+                logger.info(
+                    "Existing demo runtime stopped camera_id=%s keep_camera_id=%s video=%s",
+                    camera_id,
+                    keep_camera_id,
+                    video_path,
+                )
+    except Exception as exc:
+        logger.warning("기존 demo reader source 정리 실패 keep_camera_id=%s: %s", keep_camera_id, exc)
+
+    try:
+        for row in db_rows or db.get_cctv_list(space_id=space_id):
+            if not row.get("is_demo"):
+                continue
+            if int(row.get("space_id") or 0) != int(space_id):
+                continue
+            camera_id = int(row.get("sen_id") or 0)
+            if camera_id == int(keep_camera_id) or camera_id in stopped:
+                continue
+            if str(row.get("demo_video_key") or "scenario3_fire") != str(demo_video_key):
+                continue
+            _stop_runtime_components(camera_id)
+            stopped.add(camera_id)
+            logger.info(
+                "Existing duplicate demo runtime stopped camera_id=%s keep_camera_id=%s key=(%s,%s)",
+                camera_id,
+                keep_camera_id,
+                space_id,
+                demo_video_key,
+            )
+    except Exception as exc:
+        logger.warning("기존 demo DB runtime 정리 실패 keep_camera_id=%s: %s", keep_camera_id, exc)
+
+
+def _same_local_source(source: str, video_path: Path) -> bool:
+    try:
+        return Path(str(source)).resolve() == video_path.resolve()
+    except Exception:
+        return str(source) == str(video_path)
 
 
 def _demo_camera_meta(row: dict, video_path: Path) -> dict[str, Any]:
