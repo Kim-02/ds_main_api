@@ -6,10 +6,11 @@
   3. 등록 센서 현황 (heart_band / temp_humidity 수)
   4. MQTT 브로커 연결
   5. mDNS 서비스 실행 중
-  6. vLLM 서버 응답
-  7. YOLO 모델 파일 존재
-  8. 워치 파이프라인 스레드 현황
-  9. 핵심 API 응답 (/health)
+  6. vLLM 서버 응답 (/models 엔드포인트)
+  7. VLM 추론 (실제 채팅 완성 요청 → 응답 확인)
+  8. YOLO 모델 파일 존재
+  9. 워치 파이프라인 스레드 현황
+ 10. 핵심 API 응답 (/health)
 """
 import logging
 import os
@@ -57,6 +58,7 @@ class StartupChecker:
             ("MQTT 브로커",        self._check_mqtt),
             ("mDNS 서비스",        self._check_mdns),
             ("vLLM 서버",          self._check_vllm),
+            ("VLM 추론",           self._check_vlm_inference),
             ("YOLO 모델 파일",     self._check_yolo_model),
             ("워치 파이프라인",    self._check_watch_pipeline),
             ("API /health 응답",   self._check_health_api),
@@ -143,6 +145,36 @@ class StartupChecker:
             return ok, f"status={resp.status_code} url={base_url}"
         except Exception as exc:
             return False, f"{type(exc).__name__} — {base_url}"
+
+    async def _check_vlm_inference(self) -> tuple[bool, str]:
+        import asyncio
+        import time
+        from ai.vlm.client import OpenAiCompatibleVlm
+        from config import settings
+
+        t0 = time.perf_counter()
+        try:
+            client = OpenAiCompatibleVlm(
+                settings.vllm_base_url,
+                settings.vllm_api_key,
+                settings.vllm_model,
+                timeout=30,
+            )
+            text = await asyncio.to_thread(
+                client.request_text,
+                "테스트: 숫자 1을 출력하세요.",
+                "",
+                max_tokens=8,
+                temperature=0.0,
+                stream=False,
+            )
+            elapsed = time.perf_counter() - t0
+            ok = bool(text and text.strip())
+            preview = text.strip()[:40].replace("\n", " ")
+            return ok, f"응답={preview!r} ({elapsed:.1f}s)"
+        except Exception as exc:
+            elapsed = time.perf_counter() - t0
+            return False, f"{type(exc).__name__}: {exc} ({elapsed:.1f}s)"
 
     async def _check_yolo_model(self) -> tuple[bool, str]:
         from config import settings
