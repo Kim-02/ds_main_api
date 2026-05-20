@@ -130,6 +130,31 @@ class OpenAiCompatibleVlm:
 
         return run_vlm_timeshare(label, _request)
 
+    def request_text_direct(
+        self,
+        prompt,
+        image_path="",
+        max_tokens=256,
+        temperature=0.0,
+        system_prompt=None,
+    ):
+        """Make VLM API call directly without going through timeshare queue.
+        Use only when the caller is already inside a timeshare fn to avoid nesting.
+        """
+        content = make_content(prompt, image_path)
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content})
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=False,
+        )
+        return response.choices[0].message.content
+
     def request_json(self, prompt, image_path="", max_tokens=512, temperature=0.0):
         text = self.request_text(
             prompt, image_path,

@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from config import settings
-from core.notifications import format_person_identification_text
+from core.notifications import behavior_label_from_vlm_result, format_person_identification_text
 from core.watch_pipeline.camera_vlm import (
     WatchCameraVlmSession,
 )
@@ -820,6 +820,8 @@ def _normalize_temperature_vlm_result(
         "site_id": hazard_context.get("space_id") or camera.get("space_id"),
         "site_name": space_name,
     }
+    normalized["temperature_c"] = sample.get("temp")
+    normalized["health_attention_count"] = health_attention.get("attention_worker_count", 0)
 
     if not _has_meaningful_text(normalized.get("summary")):
         normalized["summary"] = _temperature_summary(space_name, sample.get("temp"), "")
@@ -868,43 +870,28 @@ def _normalize_temperature_vlm_result(
 
 
 def _compose_temperature_alert_message(result: dict) -> str:
-    parts = []
-    summary = str(result.get("summary") or "").strip()
-    field_status = str(result.get("field_status") or "").strip()
-    worker_movements = str(result.get("worker_movements") or "").strip()
-    person_identification = format_person_identification_text(result.get("person_identification"))
-    health_risk_summary = str(result.get("health_risk_summary") or "").strip()
-    recommended_actions = result.get("recommended_actions")
-    abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
+    """온도 VLM 결과를 컴팩트 알림 텍스트로 변환한다.
 
-    # 비틀거림·낙상은 맨 앞에 강조
-    if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
-        label = {
-            "staggering": "비틀거림 감지",
-            "falling": "낙상 감지",
-            "slumping": "신체 축 처짐 감지",
-            "leaning": "기댐 감지",
-            "crouching": "쭈그림 감지",
-        }.get(abnormal, abnormal)
-        parts.append(f"[행동 이상] {label}")
+    형식: 39.2°C | 행동: 서있음 | 건강이상자: 있음 (2명) | 조치: 고령 작업자 휴식 권고
+    """
+    temp = result.get("temperature_c")
+    temp_str = f"{float(temp):.1f}°C" if temp is not None else "온도 미확인"
 
-    if summary:
-        parts.append(f"[현장] {summary}")
-    if field_status and field_status != summary:
-        parts.append(f"현장 상태: {field_status}")
-    if worker_movements and worker_movements not in {"none", "unknown", "not_visible"}:
-        parts.append(f"작업자 동향: {worker_movements}")
-    if person_identification:
-        parts.append(f"구분 단서: {person_identification}")
-    if health_risk_summary:
-        parts.append(f"건강 위험: {health_risk_summary}")
-    if isinstance(recommended_actions, list):
-        for action in recommended_actions[:2]:
-            text = _flatten_action_item(action)
-            if _has_meaningful_text(text):
-                parts.append(f"조치: {text}")
+    behavior = behavior_label_from_vlm_result(result)
 
-    return _limit_text(" | ".join(parts), 650) if parts else "온습도 이상 감지 - VLM 분석 완료"
+    attention_count = result.get("health_attention_count") or 0
+    health_str = f"있음 ({attention_count}명)" if attention_count > 0 else "없음"
+
+    recommended_actions = result.get("recommended_actions") or []
+    action = next(
+        (_flatten_action_item(a) for a in recommended_actions if _has_meaningful_text(_flatten_action_item(a))),
+        "",
+    )
+
+    parts = [temp_str, f"행동: {behavior}", f"건강이상자: {health_str}"]
+    if action:
+        parts.append(f"조치: {action}")
+    return " | ".join(parts)
 
 
 def _build_detection_info_from_yolo(yolo_context: dict) -> dict:

@@ -634,8 +634,8 @@ class DatabaseHandler:
                 s.ip_addr,
                 s.space_id,
                 sp.space_name,
-                NULL AS hazard_type,
-                0    AS is_hazard,
+                sp.hazard_type,
+                COALESCE(sp.is_hazard, 0) AS is_hazard,
                 s.is_online,
                 s.last_seen_at,
                 s.registered_at,
@@ -669,8 +669,8 @@ class DatabaseHandler:
                             s.sen_name,
                             s.space_id,
                             sp.space_name,
-                            NULL AS hazard_type,
-                            0    AS is_hazard
+                            sp.hazard_type,
+                            COALESCE(sp.is_hazard, 0) AS is_hazard
                         FROM sensor s
                         LEFT JOIN ds_space sp
                           ON s.space_id = sp.space_id
@@ -702,8 +702,8 @@ class DatabaseHandler:
                             s.sen_locate,
                             COALESCE(c.space_id, s.space_id) AS space_id,
                             sp.space_name,
-                            NULL AS hazard_type,
-                            0    AS is_hazard,
+                            sp.hazard_type,
+                            COALESCE(sp.is_hazard, 0) AS is_hazard,
                             s.is_online,
                             c.ip_address,
                             c.camera_id,

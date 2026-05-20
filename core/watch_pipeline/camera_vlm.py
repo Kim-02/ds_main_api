@@ -318,9 +318,10 @@ class WatchCameraVlmSession:
                 if current_count > analyzed_count:
                     analyzed_count = current_count
                     try:
-                        yolo_context = self._build_autoregressive_context()
-                        frame_path = str(yolo_context.get("image_path") or "")
-                        result = self._request_vlm(yolo_context)
+                        analysis = self._request_vlm()
+                        result = analysis["result"]
+                        frame_path = analysis["frame_path"]
+                        yolo_context = analysis["yolo_context"]
                         self._set_result(result, frame_path, "", yolo_context)
                         payload = make_vlm_push_payload(
                             self.event_type,
@@ -379,9 +380,10 @@ class WatchCameraVlmSession:
             }
             self._updated_at = _now_iso()
 
-        yolo_context = self._build_autoregressive_context()
-        frame_path = str(yolo_context.get("image_path") or "")
-        result = self._request_vlm(yolo_context)
+        analysis = self._request_vlm()
+        result = analysis["result"]
+        frame_path = analysis["frame_path"]
+        yolo_context = analysis["yolo_context"]
         self._set_result(result, frame_path, "", yolo_context)
 
         payload = make_vlm_push_payload(
@@ -471,8 +473,22 @@ class WatchCameraVlmSession:
 
         return frame
 
-    def _request_vlm(self, yolo_context: dict) -> Any:
+    def _request_vlm(self) -> dict:
+        """프레임 스냅샷과 VLM 호출을 timeshare 슬롯이 열리는 시점에 함께 실행한다.
+
+        트리거 메타데이터(last_trigger)는 트리거 발생 시점 값을 스냅샷하고,
+        CCTV 프레임은 VLM 실행 직전 버퍼에서 최신 상태로 가져온다.
+        timeshare 중첩 방지를 위해 내부에서 request_text_direct()를 사용한다.
+
+        Returns:
+            {"result": ..., "frame_path": ..., "yolo_context": ...}
+        """
         from ai.vlm.client import OpenAiCompatibleVlm, extract_json
+        from ai.vlm.timeshare import run_vlm_timeshare
+
+        # 트리거 메타데이터는 지금 스냅샷 (이벤트 발생 시점 값)
+        with self._lock:
+            last_trigger = dict(self._last_trigger)
 
         client = OpenAiCompatibleVlm(
             settings.vllm_base_url,
@@ -480,51 +496,60 @@ class WatchCameraVlmSession:
             settings.vllm_model,
             timeout=settings.camera_vlm_request_timeout_seconds,
         )
-        frame_path = str(yolo_context.get("image_path") or "")
-        prompt = _call_prompt_builder(self.prompt_builder, self.camera, self._last_trigger, yolo_context)
-        prompt = _limit_prompt_for_vlm(prompt)
         max_tokens = int(getattr(settings, "camera_vlm_max_tokens", 256) or 256)
-        logger.info(
-            "[WatchCameraVLM] autoregressive VLM request camera_sen_id=%s event_type=%s frame=%s prompt_chars=%s max_tokens=%s yolo_context=%s",
-            self.camera.get("sen_id"),
-            self.event_type,
-            frame_path,
-            len(prompt),
-            max_tokens,
-            public_yolo_context(yolo_context),
-        )
         json_system_prompt = (
             "You are a JSON-only industrial safety assistant. "
             "Return exactly one valid JSON object. No markdown, no headings, no code fences, no explanation outside JSON."
         )
-        try:
-            text = client.request_text(
-                prompt,
-                frame_path,
-                max_tokens=max_tokens,
-                temperature=0.0,
-                stream=False,
-                system_prompt=json_system_prompt,
-            )
-        except Exception as exc:
-            if not _is_prompt_too_long_error(exc):
-                raise
-            retry_prompt = _build_retry_prompt(self.camera, self._last_trigger, yolo_context, self.event_type)
-            logger.warning(
-                "[WatchCameraVLM] prompt too long, retry with compact prompt camera_sen_id=%s original_chars=%s retry_chars=%s error=%s",
+        captured: dict[str, Any] = {}
+
+        def _fn() -> str:
+            # VLM 슬롯이 열리는 시점에 실행 — 최신 프레임 스냅샷
+            yolo_context = self._build_autoregressive_context()
+            frame_path = str(yolo_context.get("image_path") or "")
+            prompt = _call_prompt_builder(self.prompt_builder, self.camera, last_trigger, yolo_context)
+            prompt = _limit_prompt_for_vlm(prompt)
+            captured["yolo_context"] = yolo_context
+            captured["frame_path"] = frame_path
+            logger.info(
+                "[WatchCameraVLM] VLM request (deferred snapshot) camera_sen_id=%s event_type=%s frame=%s prompt_chars=%s max_tokens=%s yolo_context=%s",
                 self.camera.get("sen_id"),
-                len(prompt),
-                len(retry_prompt),
-                exc,
-            )
-            text = client.request_text(
-                retry_prompt,
+                self.event_type,
                 frame_path,
-                max_tokens=min(max_tokens, 192),
-                temperature=0.0,
-                stream=False,
-                system_prompt=json_system_prompt,
+                len(prompt),
+                max_tokens,
+                public_yolo_context(yolo_context),
             )
+            try:
+                return client.request_text_direct(
+                    prompt, frame_path,
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                    system_prompt=json_system_prompt,
+                )
+            except Exception as exc:
+                if not _is_prompt_too_long_error(exc):
+                    raise
+                retry_prompt = _build_retry_prompt(self.camera, last_trigger, yolo_context, self.event_type)
+                logger.warning(
+                    "[WatchCameraVLM] prompt too long, retry camera_sen_id=%s original_chars=%s retry_chars=%s",
+                    self.camera.get("sen_id"),
+                    len(prompt),
+                    len(retry_prompt),
+                )
+                return client.request_text_direct(
+                    retry_prompt, frame_path,
+                    max_tokens=min(max_tokens, 192),
+                    temperature=0.0,
+                    system_prompt=json_system_prompt,
+                )
+
+        label = f"camera_vlm:{self.camera.get('sen_id')}:{self.event_type}"
+        text = run_vlm_timeshare(label, _fn)
+
+        yolo_context = captured.get("yolo_context") or {}
+        frame_path = captured.get("frame_path") or ""
+
         logger.debug(
             "[VLM RAW] event_type=%s camera_sen_id=%s text=%s",
             self.event_type,
@@ -534,19 +559,15 @@ class WatchCameraVlmSession:
         try:
             result = extract_json(text)
             if isinstance(result, dict):
-                if self.event_type == "temperature_camera_vlm":
-                    return result
-                return _normalize_worker_regression_vlm_result(result, self.camera, self._last_trigger, yolo_context)
-            return result
+                if self.event_type != "temperature_camera_vlm":
+                    result = _normalize_worker_regression_vlm_result(result, self.camera, last_trigger, yolo_context)
+            return {"result": result, "frame_path": frame_path, "yolo_context": yolo_context}
         except Exception as exc:
             logger.warning("[WatchCameraVLM] JSON response parse failed: %s", exc)
-            return _fallback_structured_vlm_result(
-                text,
-                self.camera,
-                self._last_trigger,
-                yolo_context,
-                event_type=self.event_type,
+            fallback = _fallback_structured_vlm_result(
+                text, self.camera, last_trigger, yolo_context, event_type=self.event_type,
             )
+            return {"result": fallback, "frame_path": frame_path, "yolo_context": yolo_context}
 
     def _set_result(
         self,

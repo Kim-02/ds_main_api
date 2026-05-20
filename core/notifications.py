@@ -150,65 +150,39 @@ def _extract_site_vlm_text(result: dict) -> str:
 
 
 def _extract_worker_vlm_text(result: dict) -> str:
-    """worker_regression 모드 VLM 결과를 관리자 알림 텍스트로 변환한다."""
-    parts = []
+    """worker_regression 모드 VLM 결과를 컴팩트 알림 텍스트로 변환한다.
+
+    형식: [이름] 휴식권고/심박이상 | 행동: 비틀거림 | 질병: 고혈압, 고령 | 조치: ...
+    """
     target = result.get("target") or {}
     worker_name = str(target.get("worker_name") or "").strip()
     rest_rec = str(result.get("rest_recommendation") or "").strip()
-    summary = str(result.get("summary") or "").strip()
     health = str(result.get("health_considerations") or "").strip()
-    abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
     recommended_actions = result.get("recommended_actions") or []
 
-    behavior_obs = result.get("behavior_observation") if isinstance(result.get("behavior_observation"), dict) else {}
-    obs_detail = str(behavior_obs.get("detail") or "").strip()
-    person_identification = _person_identification_text(result.get("person_identification"))
-    _default_obs = "화면에서 자세·이동 패턴을 확인할 수 없습니다."
+    parts = []
 
-    # ① CCTV 행동 관찰
-    if abnormal in {"staggering", "falling", "slumping", "leaning", "crouching"}:
-        label = {
-            "staggering": "비틀거림 감지",
-            "falling": "낙상 감지",
-            "slumping": "신체 축 처짐 감지",
-            "leaning": "기댐 감지",
-            "crouching": "쭈그림 감지",
-        }.get(abnormal, abnormal)
-        detail_suffix = f" — {obs_detail}" if obs_detail and obs_detail != _default_obs else ""
-        parts.append(f"[행동 이상] {label}{detail_suffix}")
-    elif abnormal == "normal":
-        obs_text = obs_detail if (obs_detail and obs_detail != _default_obs) else "정상 자세 확인"
-        parts.append(f"화면: {obs_text}")
-    elif abnormal in {"not_visible", "unknown"}:
-        parts.append("화면: 작업자 위치 미확인")
+    # [이름] 휴식권고 레이블 or 심박이상
+    rest_label = _rest_recommendation_label(rest_rec)
+    header = f"[{worker_name}] {rest_label or '심박이상'}" if worker_name else (rest_label or "심박이상")
+    parts.append(header)
 
-    if person_identification:
-        parts.append(f"구분 단서: {person_identification}")
+    # 행동
+    parts.append(f"행동: {behavior_label_from_vlm_result(result)}")
 
-    # ② 작업자명 + 휴식 권고 레벨
-    rest_label = _rest_recommendation_label(rest_rec) or _rest_recommendation_label(summary)
-    header = f"[{worker_name}] {rest_label}" if worker_name and rest_label else (summary or rest_label)
-    if header:
-        parts.append(header)
+    # 질병 (건강 위험 요인) - 콜론 뒤 값만, 없으면 "없음"
+    diseases = _risk_factors_from_health_text(health)
+    no_risk = not diseases or "없" in diseases or len(diseases) > 25
+    parts.append(f"질병: {'없음' if no_risk else diseases}")
 
-    # ③ 건강 위험 요인 (라벨 제거하고 값만)
-    risk_text = _risk_factors_from_health_text(health)
-    if risk_text:
-        parts.append(f"위험요인: {risk_text}")
-
-    # ④ 조치 (중복 제거, dict 평탄화, 최대 2개)
-    seen: set[str] = set()
-    action_count = 0
+    # 조치 (1개만)
     for action in recommended_actions:
         text = _action_text(action)
-        if text and text not in seen:
-            seen.add(text)
+        if text:
             parts.append(f"조치: {text}")
-            action_count += 1
-            if action_count >= 2:
-                break
+            break
 
-    return " | ".join(parts) if parts else summary
+    return " | ".join(parts)
 
 
 def format_person_identification_text(value) -> str:
@@ -289,3 +263,30 @@ def _action_text(action: Any) -> str:
                 return val.strip()
         return " ".join(str(v) for v in action.values() if v).strip()
     return str(action).strip() if action else ""
+
+
+def _behavior_label(abnormal: str, posture: str = "") -> str:
+    """VLM abnormal_behavior + posture → 한국어 행동 레이블."""
+    a = (abnormal or "").strip().lower()
+    p = (posture or "").strip().lower()
+    if a == "staggering":
+        return "비틀거림"
+    if a in {"falling", "slumping", "leaning"}:
+        return "이상있음"
+    if a == "crouching":
+        return "앉아있음"
+    if a == "normal":
+        if p == "crouching":
+            return "앉아있음"
+        if p == "upright":
+            return "서있음"
+        return "이상없음"
+    return "미확인"
+
+
+def behavior_label_from_vlm_result(result: dict) -> str:
+    """VLM result dict에서 행동 레이블을 반환한다."""
+    abnormal = str(result.get("abnormal_behavior") or "").strip()
+    obs = result.get("behavior_observation")
+    posture = str(obs.get("posture") or "") if isinstance(obs, dict) else ""
+    return _behavior_label(abnormal, posture)
