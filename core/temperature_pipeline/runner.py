@@ -43,14 +43,12 @@ class TemperatureCameraVlmManager:
         broadcast_fn: Optional[Callable[[dict], Any]] = None,
         mqtt_alert_fn: Optional[Callable[..., Any]] = None,
         session_seconds: int = DEFAULT_SESSION_SECONDS,
-        analysis_interval_seconds: int = DEFAULT_ANALYSIS_INTERVAL_SECONDS,
     ):
         self._db_handler = db_handler
         self._loop = loop
         self._broadcast_fn = broadcast_fn
         self._mqtt_alert_fn = mqtt_alert_fn  # callable: publish_hazard_alert_to_space_watches
         self.session_seconds = session_seconds
-        self.analysis_interval_seconds = analysis_interval_seconds
         self._sessions: dict[int, WatchCameraVlmSession] = {}
         self._session_sources: dict[int, set[str]] = {}
         self._lock = threading.Lock()
@@ -309,7 +307,6 @@ class TemperatureCameraVlmManager:
                 camera=camera,
                 manager=self,
                 session_seconds=self.session_seconds,
-                analysis_interval_seconds=self.analysis_interval_seconds,
                 prompt_builder=_build_temperature_prompt,
                 event_type="temperature_camera_vlm",
             )
@@ -499,9 +496,6 @@ def build_temperature_pipeline_from_settings(db_handler, *, loop=None, broadcast
         broadcast_fn=broadcast_fn,
         mqtt_alert_fn=mqtt_alert_fn,
         session_seconds=int(getattr(settings, "temperature_vlm_session_seconds", DEFAULT_SESSION_SECONDS)),
-        analysis_interval_seconds=int(
-            getattr(settings, "temperature_vlm_analysis_interval_seconds", DEFAULT_ANALYSIS_INTERVAL_SECONDS)
-        ),
     )
     scheduler = TemperaturePipelineScheduler(
         db_handler=db_handler,
@@ -594,9 +588,6 @@ def run_temperature_camera_vlm_once(
             camera=camera,
             manager=publish_manager,
             session_seconds=int(getattr(settings, "temperature_vlm_session_seconds", DEFAULT_SESSION_SECONDS)),
-            analysis_interval_seconds=int(
-                getattr(settings, "temperature_vlm_analysis_interval_seconds", DEFAULT_ANALYSIS_INTERVAL_SECONDS)
-            ),
             prompt_builder=_build_temperature_prompt,
             event_type="temperature_camera_vlm",
         )

@@ -35,8 +35,7 @@ from core.vlm_prompt_builder import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SESSION_SECONDS = 120
-DEFAULT_ANALYSIS_INTERVAL_SECONDS = 30
+DEFAULT_SESSION_SECONDS = 30
 
 
 class WatchCameraVlmManager:
@@ -49,7 +48,6 @@ class WatchCameraVlmManager:
         loop: Optional[asyncio.AbstractEventLoop] = None,
         broadcast_fn: Optional[Callable[[dict], Any]] = None,
         session_seconds: int = DEFAULT_SESSION_SECONDS,
-        analysis_interval_seconds: int = DEFAULT_ANALYSIS_INTERVAL_SECONDS,
         prompt_builder: Optional[Callable[..., str]] = None,
         event_type: str = "watch_camera_vlm",
     ):
@@ -57,7 +55,6 @@ class WatchCameraVlmManager:
         self._loop = loop
         self._broadcast_fn = broadcast_fn
         self.session_seconds = session_seconds
-        self.analysis_interval_seconds = analysis_interval_seconds
         self.prompt_builder = prompt_builder or _build_prompt
         self.event_type = event_type
         self._sessions: dict[int, WatchCameraVlmSession] = {}
@@ -162,7 +159,6 @@ class WatchCameraVlmManager:
                 camera=camera,
                 manager=self,
                 session_seconds=self.session_seconds,
-                analysis_interval_seconds=self.analysis_interval_seconds,
                 prompt_builder=self.prompt_builder,
                 event_type=self.event_type,
             )
@@ -189,14 +185,12 @@ class WatchCameraVlmSession:
         camera: dict,
         manager: WatchCameraVlmManager,
         session_seconds: int,
-        analysis_interval_seconds: int,
         prompt_builder: Callable[..., str],
         event_type: str,
     ):
         self.camera = camera
         self.manager = manager
         self.session_seconds = session_seconds
-        self.analysis_interval_seconds = analysis_interval_seconds
         self.prompt_builder = prompt_builder
         self.event_type = event_type
         self._stop_event = threading.Event()
@@ -306,40 +300,56 @@ class WatchCameraVlmSession:
             }
 
     def _run(self) -> None:
+        """트리거가 올 때만 VLM을 한 번 실행한다.
+
+        고정 인터벌 반복 대신, extend()가 _wake_event를 set할 때마다
+        분석을 한 번 수행하고 다시 대기한다. VLM이 바쁘면 timeshare 큐에서
+        자연스럽게 대기 후 실행된다.
+        """
+        analyzed_count = 0
         try:
             while not self._stop_event.is_set():
                 if self._expired():
                     break
 
-                try:
-                    yolo_context = self._build_autoregressive_context()
-                    frame_path = str(yolo_context.get("image_path") or "")
-                    result = self._request_vlm(yolo_context)
-                    self._set_result(result, frame_path, "", yolo_context)
-                    payload = make_vlm_push_payload(
-                        self.event_type,
-                        _notification_title(self.event_type),
-                        result,
-                        camera=_public_camera(self.camera),
-                        frame_path=frame_path,
-                        yolo_context=public_yolo_context(yolo_context),
-                        status=self.status(),
-                    )
-                    self.manager.publish_result(payload)
-                    logger.info(
-                        "[VLM TEXT] event_type=%s camera_sen_id=%s app_text=%s",
-                        self.event_type,
-                        self.camera.get("sen_id"),
-                        payload.get("text") or payload.get("body") or "",
-                    )
-                except Exception as exc:
-                    logger.exception(
-                        "[WatchCameraVLM] analysis failed camera_sen_id=%s",
-                        self.camera.get("sen_id"),
-                    )
-                    self._set_result(self._latest_result, self._latest_frame_path, str(exc))
+                with self._lock:
+                    current_count = self._trigger_count
 
-                self._wait_next_interval()
+                if current_count > analyzed_count:
+                    analyzed_count = current_count
+                    try:
+                        yolo_context = self._build_autoregressive_context()
+                        frame_path = str(yolo_context.get("image_path") or "")
+                        result = self._request_vlm(yolo_context)
+                        self._set_result(result, frame_path, "", yolo_context)
+                        payload = make_vlm_push_payload(
+                            self.event_type,
+                            _notification_title(self.event_type),
+                            result,
+                            camera=_public_camera(self.camera),
+                            frame_path=frame_path,
+                            yolo_context=public_yolo_context(yolo_context),
+                            status=self.status(),
+                        )
+                        self.manager.publish_result(payload)
+                        logger.info(
+                            "[VLM TEXT] event_type=%s camera_sen_id=%s app_text=%s",
+                            self.event_type,
+                            self.camera.get("sen_id"),
+                            payload.get("text") or payload.get("body") or "",
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "[WatchCameraVLM] analysis failed camera_sen_id=%s",
+                            self.camera.get("sen_id"),
+                        )
+                        self._set_result(self._latest_result, self._latest_frame_path, str(exc))
+                else:
+                    # 새 트리거가 올 때까지 대기 (세션 만료 시간 내에서)
+                    with self._lock:
+                        remaining = max(0.0, self._deadline_monotonic - time.monotonic())
+                    self._wake_event.clear()
+                    self._wake_event.wait(timeout=remaining if remaining > 0 else 0.1)
         finally:
             with self._lock:
                 self._running = False
@@ -349,14 +359,6 @@ class WatchCameraVlmSession:
     def _expired(self) -> bool:
         with self._lock:
             return time.monotonic() >= self._deadline_monotonic
-
-    def _wait_next_interval(self) -> None:
-        self._wake_event.clear()
-        with self._lock:
-            remaining = max(0.0, self._deadline_monotonic - time.monotonic())
-        wait_seconds = min(self.analysis_interval_seconds, remaining)
-        if wait_seconds > 0:
-            self._wake_event.wait(wait_seconds)
 
     def analyze_once(
         self,

@@ -85,8 +85,7 @@ class Settings(BaseSettings):
     watch_hr_stale_seconds: int = 15
     watch_alert_duration_ms: int = 5000
     watch_alert_reset_after_ms: int = 5000
-    watch_camera_vlm_session_seconds: int = 120
-    watch_camera_vlm_analysis_interval_seconds: int = 30
+    watch_camera_vlm_session_seconds: int = 30
     camera_vlm_request_timeout_seconds: int = 90
     camera_vlm_prompt_max_chars: int = 5600
     camera_vlm_retry_prompt_max_chars: int = 1100
@@ -99,8 +98,7 @@ class Settings(BaseSettings):
     rest_default_work_duration_min: int = 0
     temperature_vlm_threshold: float = 38.0
     temperature_vlm_check_interval_seconds: int = 10
-    temperature_vlm_session_seconds: int = 120
-    temperature_vlm_analysis_interval_seconds: int = 30
+    temperature_vlm_session_seconds: int = 30
     temperature_vlm_stale_seconds: int = 60
 
     # Firebase

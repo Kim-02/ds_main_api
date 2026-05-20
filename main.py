@@ -295,7 +295,6 @@ async def lifespan(app: FastAPI):
         loop=main_loop,
         broadcast_fn=ws_manager.broadcast,
         session_seconds=settings.watch_camera_vlm_session_seconds,
-        analysis_interval_seconds=settings.watch_camera_vlm_analysis_interval_seconds,
     )
     app.state.watch_camera_vlm_manager = watch_camera_vlm_manager
 
