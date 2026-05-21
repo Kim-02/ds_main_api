@@ -371,7 +371,7 @@ async def lifespan(app: FastAPI):
             main_loop,
             ws_manager.broadcast,
             db,
-            mqtt_alert_fn=mqtt_sensor_svc.publish_hazard_alert_to_space_watches,
+            mqtt_alert_fn=mqtt_sensor_svc.publish_fire_alert_to_all_watches,
         )
         fire_manager = fire_manager_mod
         logger.info("Fire pipeline manager 초기화 완료")

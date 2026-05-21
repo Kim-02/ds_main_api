@@ -330,3 +330,39 @@ class MqttSensorService:
                 duration_ms=duration_ms,
                 reset_after_ms=reset_after_ms,
             )
+
+    def publish_fire_alert_to_all_watches(
+        self,
+        *,
+        duration_ms: int = 5000,
+        reset_after_ms: int = 15000,
+    ) -> None:
+        """화재 위험 시 등록된 모든 워치/밴드에 즉시 경고 진동을 보낸다.
+
+        publish_alert()를 직접 사용해 공간 매핑 오류와 무관하게 동작한다.
+        """
+        try:
+            rows = self.db_handler.get_registered_sensor_rows()
+        except Exception as exc:
+            logger.error("[FIRE_WATCH_ALERT] 센서 목록 조회 실패: %s", exc)
+            return
+
+        sent = 0
+        for row in rows:
+            sensor_type = str(row.get("sensor_type") or "").lower()
+            if not any(t in sensor_type for t in ("heart", "watch", "band")):
+                continue
+            sensor_id = row.get("sensor_id")
+            if not sensor_id:
+                continue
+            self.publish_alert(
+                sensor_id,
+                color="red",
+                vibration=True,
+                led=True,
+                duration_ms=duration_ms,
+                reset_after_ms=reset_after_ms,
+            )
+            sent += 1
+
+        logger.info("[FIRE_WATCH_ALERT] 화재 경고 전송 완료 watches=%s", sent)

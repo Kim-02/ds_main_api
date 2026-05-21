@@ -333,27 +333,13 @@ def _make_on_result(camera_id: int, metadata: dict | None = None, generation: in
             entry["latest_result"] = app_answer
             entry["latest_event_id"] = event_id
 
-        # 화재/연기 감지 시 같은 공간의 워치에 빨간 LED + 5초 진동 전송
-        space_id = current_metadata.get("space_id")
-        if _mqtt_alert_fn is not None and space_id is not None:
+        # 화재/연기 감지 시 모든 워치에 빨간 LED + 5초 진동 전송 (publish_alert 직접 사용)
+        if _mqtt_alert_fn is not None:
             try:
-                _mqtt_alert_fn(
-                    space_id,
-                    event_id=event_id,
-                    level="danger",
-                    title="화재/연기 위험",
-                    message=message_text,
-                    vibration=True,
-                    duration_ms=5000,
-                    reset_after_ms=15000,
-                )
-                logger.info(
-                    "[FirePipeline] 워치 위험 경고 전송 space_id=%s event_id=%s",
-                    space_id,
-                    event_id,
-                )
+                _mqtt_alert_fn(duration_ms=5000, reset_after_ms=15000)
+                logger.info("[FirePipeline] 워치 화재 경고 전송 event_id=%s", event_id)
             except Exception:
-                logger.exception("[FirePipeline] 워치 위험 경고 전송 실패 space_id=%s", space_id)
+                logger.exception("[FirePipeline] 워치 화재 경고 전송 실패 event_id=%s", event_id)
 
         if _loop is not None and _broadcast_fn is not None:
             # 앱은 기존 온습도/VLM 알림과 같은 hazard_alert payload를 수신한다.
