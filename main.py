@@ -224,10 +224,9 @@ async def lifespan(app: FastAPI):
     db.ensure_alert_event_table()
 
     # 2. IP 감지 + Jetson DB 업데이트
-    from core.jetson.service import get_real_ip, startup_db_init
+    from core.jetson.service import get_real_ip
 
     current_ip = get_real_ip()
-    startup_db_init(db, current_ip, settings.api_port)
 
     # 3. Transmission + SafetyDetectionModule
     main_loop = asyncio.get_running_loop()
