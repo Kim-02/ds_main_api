@@ -43,12 +43,23 @@ def register_sensors(req: SensorRegisterReq, request: Request):
     if not req.selected_sensors:
         raise HTTPException(status_code=400, detail="선택된 센서가 없습니다.")
 
+    mdns_service = getattr(request.app.state, "mdns_service", None)
+
     selected = []
+    offline_ids = []
     for s in req.selected_sensors:
         d = s.model_dump()
         if not d.get("sensor_id"):
             raise HTTPException(status_code=400, detail="sensor_id가 없는 센서가 포함되어 있습니다.")
+        if mdns_service is not None and not mdns_service.is_sensor_online(d["sensor_id"]):
+            offline_ids.append(d["sensor_id"])
         selected.append(d)
+
+    if offline_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"현재 온라인 상태가 아닌 센서가 포함되어 있습니다: {', '.join(offline_ids)}. 센서 전원 및 네트워크 연결을 확인해주세요.",
+        )
 
     db = request.app.state.db
     if not db.register_discovered_sensors(jetson_id, selected):

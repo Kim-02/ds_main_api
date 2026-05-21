@@ -2953,6 +2953,59 @@ class DatabaseHandler:
             return None
 
 
+    def update_sensor_online_status(self, sensor_id: str, online: bool) -> bool:
+        """sensor_id 기준 is_online 상태를 업데이트한다. mDNS TTL cleanup에서 사용."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE sensor SET is_online = %s, updated_at = NOW() WHERE sensor_id = %s",
+                        (1 if online else 0, sensor_id),
+                    )
+                conn.commit()
+                return True
+        except Exception as e:
+            logging.error("update_sensor_online_status 오류 sensor_id=%s: %s", sensor_id, e)
+            return False
+
+    def get_recent_th_by_sensor_id(self, sensor_id: str, limit: int = 3) -> list:
+        """sensor_id 기준 온습도 최근 N개 측정값 조회."""
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT sen_id FROM sensor WHERE sensor_id = %s LIMIT 1",
+                        (sensor_id,),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        return []
+                    sen_id = row["sen_id"]
+
+                    cursor.execute(
+                        """
+                        SELECT time, temp, humid
+                        FROM th_trans
+                        WHERE sen_id = %s
+                        ORDER BY time DESC
+                        LIMIT %s
+                        """,
+                        (sen_id, limit),
+                    )
+                    rows = cursor.fetchall()
+                    result = []
+                    for r in rows:
+                        t = r.get("time")
+                        result.append({
+                            "measured_at": t.strftime("%Y-%m-%dT%H:%M:%S") if t and hasattr(t, "strftime") else str(t or ""),
+                            "temperature": r.get("temp"),
+                            "humidity": r.get("humid"),
+                        })
+                    return result
+        except Exception as e:
+            logging.error("get_recent_th_by_sensor_id 오류 sensor_id=%s: %s", sensor_id, e)
+            return []
+
     # ------------------------------------------------------------------
     # 웹 대시보드용 최신 데이터
     # ------------------------------------------------------------------
