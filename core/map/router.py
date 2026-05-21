@@ -74,6 +74,17 @@ def get_latest_temp_sensor_value(sensor_id: str, request: Request):
     return {"status": "success", "data": data}
 
 
+@router.get("/sensors/{sensor_id}/telemetry/recent", summary="온습도 최근 N개 측정값 조회")
+def get_recent_telemetry(
+    sensor_id: str,
+    request: Request,
+    limit: int = Query(3, ge=1, le=20, description="조회할 최대 건수"),
+):
+    """온습도 센서의 최근 측정값을 최대 limit개 반환합니다."""
+    items = request.app.state.db.get_recent_th_by_sensor_id(sensor_id, limit)
+    return {"sensor_id": sensor_id, "items": items}
+
+
 @router.post("/sensors/position", summary="센서 위치 저장")
 def save_sensor_position(req: SensorPositionSaveReq, request: Request):
     """평면도 위에 센서 위치(비율 좌표)를 저장합니다.
