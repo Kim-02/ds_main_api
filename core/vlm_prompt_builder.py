@@ -364,40 +364,43 @@ def _risk_factor_action_hints(risk_factors: dict) -> str:
 
 
 def _common_response_schema(*, target_type: str) -> str:
+    # 값(value)은 반드시 빈 문자열 또는 열거형만 넣어야 한다.
+    # 설명 문구를 값으로 넣으면 VLM이 그 문구를 그대로 복사해 출력한다.
+    # 필드별 작성 지시는 프롬프트 본문(build_*_prompt)에서 별도로 전달한다.
     if target_type == "site":
         schema = {
-            "risk_level": "none|low|medium|high|critical 중 하나",
-            "summary": "관리자가 한눈에 이해할 수 있는 현장 상황 한 줄 요약",
-            "field_status": "현재 화면에서 보이는 현장 상황을 구체적으로 묘사. 사람 수·위치·자세·행동 포함",
-            "worker_movements": "YOLO 이력 기반 사람 이동 패턴 서술. 몇 명이 어느 방향으로 어떤 속도로 이동했는지 포함",
-            "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
-            "health_risk_summary": "건강상 주의가 필요한 작업자 수와 위험 요인 한 문장 요약",
+            "risk_level": "none|low|medium|high|critical",
+            "summary": "",
+            "field_status": "",
+            "worker_movements": "",
+            "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible",
+            "health_risk_summary": "",
             "worker_risks": [],
-            "recommended_actions": ["무엇을 → 어떻게가 명확한 조치 한 문장"],
+            "recommended_actions": [],
             "target": {"type": "site", "site_id": "", "site_name": ""},
         }
     else:
         schema = {
-            "risk_level": "none|low|medium|high|critical 중 하나",
-            "summary": "작업자 현재 상태 한 줄 요약",
-            "reason": "위험 판단 근거",
-            "health_considerations": "건강 위험 요인과 주의사항",
-            "recommended_actions": ["무엇을 → 어떻게가 명확한 조치 한 문장"],
+            "risk_level": "none|low|medium|high|critical",
+            "summary": "",
+            "reason": "",
+            "health_considerations": "",
+            "recommended_actions": [],
             "target": {
                 "type": "worker",
                 "site_id": "",
                 "site_name": "",
-                "worker_id": "작업자 ID",
-                "worker_name": "작업자명",
+                "worker_id": "",
+                "worker_name": "",
             },
-            "visible_people": "화면에 보이는 사람 수와 위치",
+            "visible_people": "",
             "worker_location": "same_space_unknown|identified|not_visible",
-            "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
+            "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible",
             "behavior_observation": {
                 "posture": "upright|leaning|crouching|fallen|unknown",
                 "movement_pattern": "normal|irregular|staggering|stationary|unknown",
                 "confidence": "high|medium|low",
-                "detail": "현재 이미지와 YOLO 이동 이력을 바탕으로 자세·이동 패턴을 구체적으로 묘사. 방향·속도 변화·불규칙성 포함",
+                "detail": "",
             },
             "visible_risks": [],
             "recommended_action": "",
