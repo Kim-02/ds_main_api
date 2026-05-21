@@ -870,28 +870,74 @@ def _normalize_temperature_vlm_result(
 
 
 def _compose_temperature_alert_message(result: dict) -> str:
-    """온도 VLM 결과를 컴팩트 알림 텍스트로 변환한다.
+    """온도 VLM 결과를 알림 텍스트로 변환한다.
 
-    형식: 39.2°C | 행동: 서있음 | 건강이상자: 있음 (2명) | 조치: 고령 작업자 휴식 권고
+    VLM 현장 묘사·건강 위험 요약을 최대한 살리고 고정 레이블은 최소화한다.
+    형식: {온도} — {이상prefix} | {field_status} | {worker_movements or health_risk} | {action}
     """
     temp = result.get("temperature_c")
     temp_str = f"{float(temp):.1f}°C" if temp is not None else "온도 미확인"
 
-    behavior = behavior_label_from_vlm_result(result)
-
-    attention_count = result.get("health_attention_count") or 0
-    health_str = f"있음 ({attention_count}명)" if attention_count > 0 else "없음"
-
+    abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
+    field_status = str(result.get("field_status") or "").strip()
+    worker_movements = str(result.get("worker_movements") or "").strip()
+    health_risk_summary = str(result.get("health_risk_summary") or "").strip()
+    summary = str(result.get("summary") or "").strip()
     recommended_actions = result.get("recommended_actions") or []
-    action = next(
-        (_flatten_action_item(a) for a in recommended_actions if _has_meaningful_text(_flatten_action_item(a))),
-        "",
-    )
 
-    parts = [temp_str, f"행동: {behavior}", f"건강이상자: {health_str}"]
-    if action:
-        parts.append(f"조치: {action}")
-    return " | ".join(parts)
+    _abnormal_prefix = {
+        "staggering": "비틀거림 감지",
+        "falling":    "낙상 감지",
+        "slumping":   "신체 처짐 감지",
+        "leaning":    "기댐 감지",
+    }
+    prefix = _abnormal_prefix.get(abnormal)
+
+    parts = []
+
+    # 온도 + 이상 행동 prefix (식별자)
+    parts.append(f"{temp_str} — {prefix}" if prefix else temp_str)
+
+    # VLM 현장 묘사 (field_status)
+    if field_status and not _is_vlm_filler(field_status):
+        parts.append(field_status)
+
+    # VLM YOLO 관찰 (worker_movements) — field_status와 중복 아닐 때만
+    if (
+        worker_movements
+        and not _is_vlm_filler(worker_movements)
+        and worker_movements not in {"none", "unknown", "not_visible"}
+        and worker_movements != field_status
+    ):
+        parts.append(worker_movements)
+
+    # VLM 건강 위험 요약 or summary (중복 제외)
+    existing_text = " ".join(parts)
+    if health_risk_summary and not _is_vlm_filler(health_risk_summary) and health_risk_summary[:20] not in existing_text:
+        parts.append(health_risk_summary)
+    elif summary and not _is_vlm_filler(summary) and summary[:20] not in existing_text:
+        parts.append(summary)
+
+    # VLM 조치 (레이블 없이)
+    for a in recommended_actions:
+        text = _flatten_action_item(a)
+        if _has_meaningful_text(text):
+            parts.append(text)
+            break
+
+    return " | ".join(parts) if parts else "온습도 이상 감지"
+
+
+def _is_vlm_filler(text: str) -> bool:
+    """VLM 기본값/템플릿 응답인지 판별한다."""
+    if not text:
+        return True
+    _fillers = {
+        "확인 필요", "unknown", "none", "null", "not_visible",
+        "화면에서 확인할 수 없", "현장 상태 확인이 필요", "VLM 응답 오류",
+    }
+    lower = text.strip().lower()
+    return lower in _fillers or any(f in text for f in _fillers)
 
 
 def _build_detection_info_from_yolo(yolo_context: dict) -> dict:

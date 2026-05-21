@@ -105,11 +105,32 @@ class WatchPipelineRunner:
     def _trigger_same_space_camera_vlm(self, worker_id: str, prediction: dict) -> None:
         if self._camera_vlm_manager is None:
             return
+
+        # 새 repository 메서드로 LEFT JOIN 기반 통합 컨텍스트 조회
+        # (worker_hr_data 없어도 진행, is_manager 포함, hazard_type 포함)
+        enriched_prediction = prediction
+        try:
+            trigger_data = self._repository.build_worker_vlm_trigger(
+                worker_id,
+                regression_result=prediction,
+            )
+            worker_info = trigger_data.get("prediction", {}).get("worker", {})
+            if worker_info.get("is_manager"):
+                logger.info("[WatchPipeline] 관리자 VLM 트리거 스킵 worker_id=%s", worker_id)
+                return
+            # compact_worker_regression_trigger_for_prompt 호환 형태(inner prediction dict) 사용
+            enriched_prediction = trigger_data.get("prediction", prediction)
+        except Exception as exc:
+            logger.warning(
+                "[WatchPipeline] build_worker_vlm_trigger 실패, 기존 prediction 사용 worker_id=%s: %s",
+                worker_id, exc,
+            )
+
         try:
             result = self._camera_vlm_manager.trigger_for_watch_sensor(
                 self.sensor_id,
                 worker_id=worker_id,
-                prediction=prediction,
+                prediction=enriched_prediction,
             )
             logger.info("[WatchPipeline] same-space camera VLM trigger result=%s", result)
         except Exception as exc:

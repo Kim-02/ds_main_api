@@ -190,7 +190,262 @@ class DatabaseHandlerRestDataRepository:
             profile.baseline_hr,
         )
         return profile
+    def fetch_worker_vlm_context(self, worker_id: str) -> dict[str, Any]:
+        """
+        VLM 프롬프트 생성용 작업자 통합 context를 반환한다.
 
+        목적:
+        - VLM 화면 출력 3개 항목 생성에 필요한 데이터만 모은다.
+        - worker, worker_hr_data, sensor, ds_space, hb_trans, th_trans 데이터를 통합한다.
+        - 센서가 없거나 최신 측정값이 없어도 VLM 프롬프트 생성이 중단되지 않게 한다.
+
+        반환 구조:
+        {
+            "worker": {...},
+            "watch": {...},
+            "environment": {...},
+            "space": {...}
+        }
+        """
+        worker_row = self._fetch_one(
+            """
+            SELECT
+                w.dept_id,
+                w.name,
+                w.is_manager,
+                w.sen_id,
+
+                wh.age,
+                wh.gender,
+                wh.height_cm,
+                wh.weight_kg,
+                wh.elderly_flag,
+                wh.heart_disease,
+                wh.hypertension,
+                wh.other_disease,
+                wh.baseline_hr,
+
+                s.sensor_id AS watch_sensor_id,
+                s.sen_name AS watch_sensor_name,
+                s.mqtt_topic AS watch_mqtt_topic,
+                s.space_id AS space_id,
+
+                sp.space_name AS space_name,
+                sp.hazard_type AS hazard_type,
+                sp.is_hazard AS is_hazard
+            FROM worker w
+            LEFT JOIN worker_hr_data wh
+            ON wh.dept_id = w.dept_id
+            LEFT JOIN sensor s
+            ON w.sen_id = s.sen_id
+            LEFT JOIN ds_space sp
+            ON s.space_id = sp.space_id
+            WHERE w.dept_id = %s
+            LIMIT 1
+            """,
+            (_coerce_worker_id(worker_id),),
+            source_name="worker_vlm_context",
+        )
+
+        watch_row = self._fetch_optional(
+            """
+            SELECT
+                h.hr,
+                h.time AS measured_at,
+                s.sensor_id AS sensor_id,
+                s.sen_name AS sensor_name
+            FROM worker w
+            JOIN hb_trans h
+            ON h.sen_id = w.sen_id
+            LEFT JOIN sensor s
+            ON s.sen_id = w.sen_id
+            WHERE w.dept_id = %s
+            ORDER BY h.time DESC
+            LIMIT 1
+            """,
+            (_coerce_worker_id(worker_id),),
+        )
+
+        environment_row = self.fetch_environment_optional(worker_id)
+
+        baseline_hr = _optional_float(worker_row, "baseline_hr")
+        hr = _optional_float(watch_row or {}, "hr")
+
+        hr_delta_from_baseline = None
+        if hr is not None and baseline_hr is not None:
+            hr_delta_from_baseline = round(hr - baseline_hr, 2)
+
+        environment = {
+            "temperature_c": None,
+            "humidity_pct": None,
+            "heat_index_c": None,
+            "sensor_id": "",
+            "sensor_name": "",
+            "space_id": _optional_int(worker_row, "space_id"),
+            "space_name": str(worker_row.get("space_name") or ""),
+        }
+
+        if environment_row:
+            temp_c = _optional_float(environment_row, "temp_c")
+            humid = _optional_float(environment_row, "humid")
+
+            environment.update(
+                {
+                    "temperature_c": temp_c,
+                    "humidity_pct": humid,
+                    "heat_index_c": _calculate_heat_index_c(temp_c, humid),
+                    "sensor_id": str(environment_row.get("sensor_id") or ""),
+                    "sensor_name": str(environment_row.get("sensor_name") or ""),
+                    "space_id": _optional_int(environment_row, "space_id"),
+                    "space_name": str(environment_row.get("space_name") or ""),
+                }
+            )
+
+        return {
+            "worker": {
+                "worker_id": str(worker_row.get("dept_id") or ""),
+                "worker_name": str(worker_row.get("name") or ""),
+                "is_manager": _optional_int(worker_row, "is_manager"),
+                "watch_sen_id": worker_row.get("sen_id"),
+                "watch_sensor_id": str(worker_row.get("watch_sensor_id") or ""),
+                "watch_sensor_name": str(worker_row.get("watch_sensor_name") or ""),
+                "watch_mqtt_topic": str(worker_row.get("watch_mqtt_topic") or ""),
+            },
+            "watch": {
+                "hr": hr,
+                "baseline_hr": baseline_hr,
+                "hr_delta_from_baseline": hr_delta_from_baseline,
+                "measured_at": _serialize_datetime((watch_row or {}).get("measured_at")),
+                "sensor_id": str((watch_row or {}).get("sensor_id") or worker_row.get("watch_sensor_id") or ""),
+                "sensor_name": str((watch_row or {}).get("sensor_name") or worker_row.get("watch_sensor_name") or ""),
+            },
+            "health_profile": {
+                "age": _optional_int(worker_row, "age"),
+                "gender": _encode_gender(worker_row.get("gender")) if worker_row.get("gender") is not None else None,
+                "height_cm": _optional_float(worker_row, "height_cm"),
+                "weight_kg": _optional_float(worker_row, "weight_kg"),
+                "elderly_flag": _optional_int(worker_row, "elderly_flag"),
+                "heart_disease": _optional_int(worker_row, "heart_disease"),
+                "hypertension": _optional_int(worker_row, "hypertension"),
+                "other_disease": _optional_int(worker_row, "other_disease"),
+                "baseline_hr": baseline_hr,
+            },
+            "space": {
+                "space_id": _optional_int(worker_row, "space_id"),
+                "space_name": str(worker_row.get("space_name") or ""),
+                "hazard_type": str(worker_row.get("hazard_type") or ""),
+                "is_hazard": _optional_int(worker_row, "is_hazard"),
+            },
+            "environment": environment,
+        }
+
+    def fetch_environment_optional(self, worker_id: str) -> Optional[dict[str, Any]]:
+        """
+        VLM용 온습도 조회.
+        기존 fetch_environment()와 같은 의미지만,
+        온습도 센서가 없거나 작업자 센서가 공간에 매핑되지 않아도 예외를 발생시키지 않는다.
+        """
+        placeholders = ", ".join(["%s"] * len(TEMPERATURE_SENSOR_TYPES))
+
+        return self._fetch_optional(
+            f"""
+            SELECT
+                t.temp AS temp_c,
+                t.humid AS humid,
+                ts.sensor_id AS sensor_id,
+                ts.sen_name AS sensor_name,
+                ws.space_id AS space_id,
+                sp.space_name AS space_name
+            FROM worker w
+            JOIN sensor ws
+              ON w.sen_id = ws.sen_id
+            JOIN sensor ts
+              ON ts.space_id = ws.space_id
+             AND LOWER(ts.sensor_type) IN ({placeholders})
+            JOIN th_trans t
+              ON t.sen_id = ts.sen_id
+            LEFT JOIN ds_space sp
+              ON ws.space_id = sp.space_id
+            WHERE w.dept_id = %s
+            ORDER BY t.time DESC
+            LIMIT 1
+            """,
+            (*TEMPERATURE_SENSOR_TYPES, _coerce_worker_id(worker_id)),
+        )
+
+    def build_worker_vlm_trigger(
+        self,
+        worker_id: str,
+        *,
+        regression_result: dict[str, Any] | None = None,
+        body_temperature_c: float | None = None,
+        triggered_at: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        VLM prompt_builder가 바로 사용할 수 있는 trigger를 생성한다.
+
+        regression_result 예:
+        {
+            "result": "강한휴식권고",
+            "reason": "기준 심박 대비 상승",
+            "rest_reason_detail": "기준 심박 75 대비 현재 심박 102",
+            "probabilities": {...}
+        }
+        """
+        context = self.fetch_worker_vlm_context(worker_id)
+        regression_result = regression_result or {}
+
+        worker = context["worker"]
+        watch = context["watch"]
+        health_profile = context["health_profile"]
+        space = context["space"]
+        environment = context["environment"]
+
+        result = (
+            regression_result.get("result")
+            or regression_result.get("label")
+            or regression_result.get("prediction")
+        )
+
+        return {
+            "trigger_type": "worker_regression",
+            "worker_id": worker.get("worker_id"),
+            "watch_sensor_id": worker.get("watch_sensor_id") or watch.get("sensor_id"),
+            "triggered_at": triggered_at or datetime.now().isoformat(timespec="seconds"),
+
+            "prediction": {
+                "worker": {
+                    "dept_id": worker.get("worker_id"),
+                    "name": worker.get("worker_name"),
+                    "is_manager": worker.get("is_manager"),
+                    "watch_sensor_id": worker.get("watch_sensor_id") or watch.get("sensor_id"),
+
+                    "space_id": space.get("space_id"),
+                    "space_name": space.get("space_name"),
+                    "hazard_type": space.get("hazard_type"),
+                    "is_hazard": space.get("is_hazard"),
+                },
+
+                "measurements": {
+                    "hr": watch.get("hr"),
+                    "baseline_hr": watch.get("baseline_hr"),
+                    "hr_delta_from_baseline": watch.get("hr_delta_from_baseline"),
+                    "body_temperature_c": body_temperature_c,
+
+                    "space_id": space.get("space_id"),
+                    "space_name": space.get("space_name"),
+                },
+
+                "health_profile": health_profile,
+
+                "result": result,
+                "reason": regression_result.get("reason"),
+                "rest_reason_detail": regression_result.get("rest_reason_detail"),
+                "probabilities": regression_result.get("probabilities"),
+            },
+
+            "environment": environment,
+        }
     def fetch_last_hr_time(self, sensor_id: str) -> Optional[datetime]:
         """hb_trans 에서 이 센서의 가장 최근 심박 수신 시각을 반환한다.
 
@@ -350,3 +605,49 @@ def _encode_gender(value: Any) -> int:
         return int(float(text))
     except ValueError:
         return -1
+
+def _serialize_datetime(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    return str(value)
+
+
+def _calculate_heat_index_c(temp_c: float | None, humid: float | None) -> float | None:
+    """
+    간단한 열지수 계산 함수.
+    입력값이 없거나, 온도가 낮은 경우에는 None을 반환한다.
+
+    VLM 프롬프트에서는 이 값을 '상황 조치 방법'에만 사용하고,
+    '건강정보 전달'의 직접 근거로 쓰지 않는다.
+    """
+    if temp_c is None or humid is None:
+        return None
+
+    try:
+        t_c = float(temp_c)
+        rh = float(humid)
+    except (TypeError, ValueError):
+        return None
+
+    # 일반적으로 열지수는 고온 조건에서 의미가 크므로 낮은 온도에서는 생략
+    if t_c < 26.0:
+        return None
+
+    t_f = (t_c * 9.0 / 5.0) + 32.0
+
+    hi_f = (
+        -42.379
+        + 2.04901523 * t_f
+        + 10.14333127 * rh
+        - 0.22475541 * t_f * rh
+        - 0.00683783 * t_f * t_f
+        - 0.05481717 * rh * rh
+        + 0.00122874 * t_f * t_f * rh
+        + 0.00085282 * t_f * rh * rh
+        - 0.00000199 * t_f * t_f * rh * rh
+    )
+
+    hi_c = (hi_f - 32.0) * 5.0 / 9.0
+    return round(hi_c, 2)

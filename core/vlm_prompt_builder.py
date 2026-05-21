@@ -40,10 +40,13 @@ def build_common_autoregressive_vlm_prompt(camera: dict, yolo_context: dict | No
     return (
         "분석 명칭: autoregressive VLM.\n"
         "반드시 모든 응답 필드 값을 한국어로 작성하세요. 영어 사용 금지.\n"
-        "산업 안전 안내만 작성, 의료 진단 금지. 가능성/주의/관리자 확인 표현을 사용하세요.\n"
-        "현재 CCTV 이미지 우선, YOLO 10초 정규화는 보조 근거. 화면에 보이지 않는 것은 확정하지 마세요.\n"
-        "사람이 보이면 개인 신원 추정은 금지하고, 옷 색/안전모·조끼 색/화면 위치/이동 방향 같은 시각 구분 단서만 기록하세요.\n"
-        "옷 색이나 보호구가 불확실하면 추측하지 말고 unknown 또는 확인 필요로 쓰세요.\n"
+        "산업 안전 안내만 작성하고, 의료 진단은 금지하세요.\n"
+        "현재 CCTV 이미지와 YOLO 10초 정규화 이력을 함께 참고하세요.\n"
+        "현재 화면에 보이지 않는 것은 확정하지 말고, 확인 필요라고 작성하세요.\n"
+        "사람의 옷 색, 안전모 색, 조끼 색 등 외형 색상으로 작업자를 구분하거나 특정하지 마세요.\n"
+        "영상 분석은 현장 요약과 사람의 위치·이동 방향 설명에 집중하세요.\n"
+        "YOLO 이력은 사람의 이동 방향과 위치 변화 판단에만 사용하세요.\n"
+        "비틀거림, 낙상, 건강 이상 같은 행동 이상은 불확실하면 단정하지 마세요.\n"
         f"현재시각={datetime.now().isoformat(timespec='seconds')}\n"
         f"카메라={json_dumps(compact_camera_for_prompt(camera))}\n"
         f"{format_yolo_context_for_prompt(yolo_context)}\n"
@@ -78,29 +81,76 @@ def build_environment_health_prompt(camera: dict, trigger: dict, yolo_context: d
         f"응답형식={_common_response_schema(target_type='site')}"
     )
 
+def compact_environment_for_prompt(trigger: dict, camera: dict) -> dict:
+    prediction = _prediction_or_trigger(trigger)
+    env = (
+        prediction.get("environment")
+        or trigger.get("environment")
+        or camera.get("environment")
+        or {}
+    )
 
-def build_worker_regression_prompt(camera: dict, trigger: dict, yolo_context: dict | None = None) -> str:
-    context = compact_worker_regression_trigger_for_prompt(trigger)
+    return {
+        "air_temperature_c": env.get("air_temperature_c") or env.get("temperature") or env.get("temp"),
+        "humidity_pct": env.get("humidity_pct") or env.get("humidity"),
+        "heat_index_c": env.get("heat_index_c") or env.get("heat_index"),
+        "environment_risk_level": env.get("risk_level"),
+    }
+
+def build_worker_regression_prompt(
+    camera: dict,
+    trigger: dict,
+    yolo_context: dict | None,
+) -> str:
+    worker_health_data = compact_worker_regression_trigger_for_prompt(trigger)
+    environment_data = compact_environment_for_prompt(trigger, camera)
+
     return (
         build_common_autoregressive_vlm_prompt(camera, yolo_context)
+
         + "판단유형=worker_regression\n"
-        "관점: 특정 작업자 건강 위험도 판단입니다. 심박/기준심박/건강요인/체온 등 개인 건강 데이터만 보세요.\n"
-        "작업장 온도/습도/열지수 등 환경 데이터는 이 판단에 사용하지 마세요.\n"
-        "작업자를 화면에서 특정 못하면 worker_location=same_space_unknown, 화면상 증상은 단정 금지.\n"
-        "회귀 결과가 약한휴식권고이면 risk_level은 최소 medium, 강한휴식권고는 high, 반드시 휴식은 critical로 보세요.\n"
-        "휴식권고가 있으면 CCTV에 사람이 안 보여도 no_action을 쓰지 말고 작업자 휴식/관리자 확인 조치를 recommended_actions에 넣으세요.\n"
-        "[비틀거림·신체 이상 탐지 - pose estimation 없이 VLM으로 판단]\n"
-        "① 현재 이미지에서 사람의 자세를 보세요: 직립=upright, 기대거나 몸이 기울어짐=leaning, 쭈그리거나 구부러짐=crouching, 쓰러짐=fallen.\n"
-        "② YOLO 10초 이력(person_movement.delta)에서 이동 패턴을 보세요: delta 값이 크거나 방향이 불규칙하면 staggering 가능성. 작고 일정하면 normal.\n"
-        "③ abnormal_behavior 필드에 아래 중 하나를 반드시 채우세요:\n"
-        "   'staggering'(비틀거림), 'falling'(쓰러짐·낙상), 'slumping'(축 처짐), 'crouching'(쭈그림), 'leaning'(기댐), 'normal'(정상), 'not_visible'(화면 미확인)\n"
-        "④ 사람이 보이면 person_identification에 옷 색, 안전모/조끼 색, 화면 위치, 이동 방향을 써서 관리자가 구분 가능하게 하세요.\n"
-        "⑤ 워치 대상 작업자를 화면에서 특정할 수 없으면 target_worker_match='unknown' 또는 'not_visible'로 쓰세요. 옷 색만으로 특정 작업자라고 단정하지 마세요.\n"
-        "⑥ staggering 또는 falling 탐지 시 risk_level을 최소 high로 올리고, recommended_actions에 즉각 현장 확인을 추가하세요.\n"
-        "⑦ 화면에 사람이 없으면 abnormal_behavior='not_visible'로 쓰고, YOLO 이력만 참고해 판단하세요.\n"
-        f"작업자회귀판단={json_dumps(context)}\n"
-        "코드블록 없이 JSON 하나만 출력하세요.\n"
-        f"응답형식={_common_response_schema(target_type='worker')}"
+        + "응답 형식: 반드시 JSON만 출력하세요. 마크다운, 코드블록, 설명문은 출력하지 마세요.\n"
+        + "출력 필드는 반드시 아래 3개만 사용하세요.\n"
+        + "1. 영상 분석 결과 텍스트 전달\n"
+        + "2. 상황 조치 방법\n"
+        + "3. 건강정보 전달\n"
+        + "위 3개 필드 외에 risk_level, abnormal_behavior, behavior_observation, person_identification, recommended_actions 같은 별도 필드는 출력하지 마세요.\n"
+
+        + "\n[데이터 사용 원칙]\n"
+        + "작업자_건강데이터는 '건강정보 전달' 작성에 사용하세요.\n"
+        + "작업장_환경데이터는 '상황 조치 방법' 작성에만 사용하세요.\n"
+        + "작업장 온도, 습도, 열지수는 건강 이상 판단 근거로 사용하지 마세요.\n"
+        + "건강정보 전달은 심박수, 기준심박수, 체온, 건강요인, 회귀 결과, 휴식권고 결과만 기준으로 작성하세요.\n"
+
+        + "\n[영상 분석 결과 텍스트 전달 작성 기준]\n"
+        + "현재 CCTV 장면을 간단히 요약하세요.\n"
+        + "사람이 보이면 화면 기준 위치와 이동 방향을 설명하세요.\n"
+        + "YOLO 10초 이력의 person_movement.delta, bbox center 변화, frame별 위치 변화를 이용해 사람이 어디에서 어디로 이동했는지 작성하세요.\n"
+        + "사람이 보이지 않으면 '현재 화면에서 작업자는 확인되지 않습니다'라고 작성하세요.\n"
+        + "옷 색, 안전모 색, 조끼 색으로 사람을 구분하거나 특정하지 마세요.\n"
+
+        + "\n[상황 조치 방법 작성 기준]\n"
+        + "현장 상황을 보고 관리자가 해야 할 조치사항을 작성하세요.\n"
+        + "작업장 온도, 습도, 열지수, 화재, 연기, 스파크, 쓰러진 사람, 위험 구역 접근, 위험물 취급 공간 여부를 참고하세요.\n"
+        + "작업장 온도나 열지수가 높으면 환기, 냉방, 그늘 확보, 작업 강도 조절, 휴식 안내, 수분 섭취 안내를 포함하세요.\n"
+        + "화재, 연기, 스파크가 보이면 즉시 작업 중지, 현장 대피, 전원 차단, 관리자 확인, 소화 장비 확인을 포함하세요.\n"
+        + "사람이 쓰러진 것으로 명확히 보이면 즉시 현장 확인, 주변 작업 중지, 응급 연락, 의식 및 호흡 확인을 포함하세요.\n"
+        + "위험물 취급 공간이면 해당 물질의 접촉, 누출, 화기 접근 가능성을 확인하라고 작성하세요.\n"
+
+        + "\n[건강정보 전달 작성 기준]\n"
+        + "해당 작업자의 개인 건강 데이터 기반 이상 사항과 조치사항을 작성하세요.\n"
+        + "심박수, 기준심박수, 체온, 건강요인, 회귀 결과, 휴식권고 결과만 사용하세요.\n"
+        + "작업장 온도, 습도, 열지수는 건강정보 판단 근거로 사용하지 마세요.\n"
+        + "심박이 기준보다 높거나 체온 이상, 건강 위험 요인, 휴식권고가 있으면 어떤 이상이 있는지와 필요한 조치를 함께 작성하세요.\n"
+        + "약한휴식권고이면 휴식 권고와 관리자 확인을 작성하세요.\n"
+        + "강한휴식권고이면 즉시 작업 중지, 휴식, 관리자 확인을 작성하세요.\n"
+        + "반드시 휴식이면 즉시 작업 중지, 안전한 장소 이동, 관리자 또는 응급 담당자 확인을 작성하세요.\n"
+        + "CCTV에 사람이 보이지 않아도 개인 건강 데이터에 휴식권고가 있으면 휴식 및 관리자 확인 조치를 작성하세요.\n"
+        + "건강 이상이 명확하지 않으면 '현재 전달된 개인 건강 데이터 기준으로 뚜렷한 이상 징후는 확인되지 않습니다'라고 작성하세요.\n"
+
+        + f"\n작업자_건강데이터={json_dumps(worker_health_data)}\n"
+        + f"작업장_환경데이터={json_dumps(environment_data)}\n"
+        + f"응답스키마={_common_response_schema(target_type='worker')}\n"
     )
 
 
@@ -316,40 +366,23 @@ def _risk_factor_action_hints(risk_factors: dict) -> str:
 def _common_response_schema(*, target_type: str) -> str:
     if target_type == "site":
         schema = {
-            "risk_level": "",
-            "summary": "",
-            "field_status": "",
-            "worker_movements": "",
+            "risk_level": "none|low|medium|high|critical 중 하나",
+            "summary": "관리자가 한눈에 이해할 수 있는 현장 상황 한 줄 요약",
+            "field_status": "현재 화면에서 보이는 현장 상황을 구체적으로 묘사. 사람 수·위치·자세·행동 포함",
+            "worker_movements": "YOLO 이력 기반 사람 이동 패턴 서술. 몇 명이 어느 방향으로 어떤 속도로 이동했는지 포함",
             "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
-            "health_risk_summary": "",
+            "health_risk_summary": "건강상 주의가 필요한 작업자 수와 위험 요인 한 문장 요약",
             "worker_risks": [],
-            "person_identification": {
-                "moving_people": [
-                    {
-                        "label": "사람1",
-                        "clothing": "상의/하의 색 또는 unknown",
-                        "ppe": "안전모/조끼 색 또는 unknown",
-                        "position": "화면 위치",
-                        "movement": "이동 방향",
-                        "confidence": "high|medium|low",
-                    }
-                ],
-                "note": "사람 구분 단서 요약",
-            },
-            "recommended_actions": [],
-            "target": {
-                "type": "site",
-                "site_id": "",
-                "site_name": "",
-            },
+            "recommended_actions": ["무엇을 → 어떻게가 명확한 조치 한 문장"],
+            "target": {"type": "site", "site_id": "", "site_name": ""},
         }
     else:
         schema = {
             "risk_level": "none|low|medium|high|critical 중 하나",
-            "summary": "",
-            "reason": "",
-            "health_considerations": "",
-            "recommended_actions": [],
+            "summary": "작업자 현재 상태 한 줄 요약",
+            "reason": "위험 판단 근거",
+            "health_considerations": "건강 위험 요인과 주의사항",
+            "recommended_actions": ["무엇을 → 어떻게가 명확한 조치 한 문장"],
             "target": {
                 "type": "worker",
                 "site_id": "",
@@ -357,28 +390,14 @@ def _common_response_schema(*, target_type: str) -> str:
                 "worker_id": "작업자 ID",
                 "worker_name": "작업자명",
             },
-            "visible_people": "",
-            "worker_location": "",
-            "person_identification": {
-                "target_worker_match": "matched|possible|not_visible|unknown",
-                "moving_people": [
-                    {
-                        "label": "사람1",
-                        "clothing": "상의/하의 색 또는 unknown",
-                        "ppe": "안전모/조끼 색 또는 unknown",
-                        "position": "화면 위치",
-                        "movement": "이동 방향",
-                        "confidence": "high|medium|low",
-                    }
-                ],
-                "note": "워치 대상과 화면상 사람의 구분 단서",
-            },
+            "visible_people": "화면에 보이는 사람 수와 위치",
+            "worker_location": "same_space_unknown|identified|not_visible",
             "abnormal_behavior": "staggering|falling|slumping|crouching|leaning|normal|not_visible 중 하나",
             "behavior_observation": {
                 "posture": "upright|leaning|crouching|fallen|unknown",
                 "movement_pattern": "normal|irregular|staggering|stationary|unknown",
                 "confidence": "high|medium|low",
-                "detail": "화면에서 관찰한 자세·이동 패턴 자유 묘사 (한국어)",
+                "detail": "현재 이미지와 YOLO 이동 이력을 바탕으로 자세·이동 패턴을 구체적으로 묘사. 방향·속도 변화·불규칙성 포함",
             },
             "visible_risks": [],
             "recommended_action": "",

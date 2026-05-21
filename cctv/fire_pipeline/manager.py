@@ -50,39 +50,63 @@ def _alert_level(answer: Any) -> str:
 
 
 def _alert_message(answer: Any) -> str:
+    """VLM 분석 결과를 알림 텍스트로 변환한다.
+
+    VLM이 생성한 화면 묘사·원인·확산 경로를 최대한 살리고 고정 레이블은 제거한다.
+    형식: [{공간}] {summary} | {screen + cause 자연문} | {spread} | {action}
+    """
     if isinstance(answer, dict):
-        summary = str(answer.get("summary") or "").strip()
+        summary = _clean_alert_text(answer.get("summary"), max_chars=120)
         location = answer.get("workplace_location") if isinstance(answer.get("workplace_location"), dict) else {}
         target = answer.get("target") if isinstance(answer.get("target"), dict) else {}
         space_name = str(location.get("space_name") or target.get("site_name") or "").strip()
         screen = _clean_alert_text(answer.get("screen_analysis"), max_chars=140)
         cause = answer.get("fire_cause") if isinstance(answer.get("fire_cause"), dict) else {}
         spread = answer.get("spread_path") if isinstance(answer.get("spread_path"), dict) else {}
-        actions = answer.get("recommended_actions") if isinstance(answer.get("recommended_actions"), list) else []
-        hazard_material = _clean_alert_text(answer.get("hazard_material"), max_chars=40)
+        visible_people = _clean_alert_text(answer.get("visible_people"), max_chars=60)
+        person_movement = _clean_alert_text(answer.get("person_movement"), max_chars=80)
+
         parts = []
+
+        # VLM 요약 (공간명 prefix)
         if summary:
-            parts.append(f"[{space_name}] {summary}" if space_name and space_name not in summary else summary)
-        if screen:
-            parts.append(f"화면: {screen}")
-        cause_text = str(cause.get("cause") or "").strip()
-        if cause_text:
-            parts.append(f"원인: {cause_text}")
-        spread_text = str(spread.get("route") or spread.get("direction") or "").strip()
-        if spread_text:
-            parts.append(f"확산: {spread_text}")
-        if hazard_material and hazard_material.lower() != "none":
-            parts.append(f"위험물: {hazard_material}")
-        for action in actions[:2]:
-            action_text = _clean_alert_text(action, max_chars=120)
-            if action_text:
-                parts.append(f"조치: {action_text}")
+            if space_name and space_name not in summary:
+                parts.append(f"[{space_name}] {summary}")
+            else:
+                parts.append(summary)
+
+        # VLM 화면 묘사 + 원인 자연문으로 합치기
+        cause_text = _clean_alert_text(cause.get("cause"), max_chars=60) if cause else ""
+        _unknown = {"확인 필요", "unknown", "none", "알 수 없음"}
+        if screen and cause_text and cause_text not in _unknown:
+            parts.append(f"{screen}, {cause_text}으로 추정")
+        elif screen:
+            parts.append(screen)
+        elif cause_text and cause_text not in _unknown:
+            parts.append(f"{cause_text}으로 추정")
+
+        # VLM 확산 경로
+        spread_text = _clean_alert_text(
+            spread.get("route") or spread.get("direction"), max_chars=80
+        ) if spread else ""
+        if spread_text and spread_text not in _unknown:
+            parts.append(spread_text)
+
+        # VLM 사람 묘사 (화면 묘사와 다를 때)
+        existing = " ".join(parts)
+        if visible_people and visible_people not in _unknown and visible_people[:15] not in existing:
+            people_str = visible_people
+            if person_movement and person_movement not in _unknown:
+                people_str = f"{visible_people}, {person_movement}"
+            parts.append(people_str)
+
         if parts:
             return " | ".join(parts)
+
     return (
         extract_vlm_text(answer)
         or str(answer or "").strip()
-        or "CCTV 화재/연기 autoregressive VLM 분석이 완료되었습니다."
+        or "CCTV 화재/연기 분석 완료"
     )
 
 

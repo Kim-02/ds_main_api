@@ -150,37 +150,60 @@ def _extract_site_vlm_text(result: dict) -> str:
 
 
 def _extract_worker_vlm_text(result: dict) -> str:
-    """worker_regression 모드 VLM 결과를 컴팩트 알림 텍스트로 변환한다.
+    """worker_regression 모드 VLM 결과를 알림 텍스트로 변환한다.
 
-    형식: [이름] 휴식권고/심박이상 | 행동: 비틀거림 | 질병: 고혈압, 고령 | 조치: ...
+    VLM이 생성한 행동 관찰·상황 묘사를 최대한 살리고 고정 레이블은 최소화한다.
+    형식: [이름] {이상prefix — obs_detail} | {summary} | {action}
     """
     target = result.get("target") or {}
     worker_name = str(target.get("worker_name") or "").strip()
-    rest_rec = str(result.get("rest_recommendation") or "").strip()
-    health = str(result.get("health_considerations") or "").strip()
+    abnormal = str(result.get("abnormal_behavior") or "").strip().lower()
+    behavior_obs = result.get("behavior_observation") if isinstance(result.get("behavior_observation"), dict) else {}
+    obs_detail = str(behavior_obs.get("detail") or "").strip()
+    summary = str(result.get("summary") or "").strip()
     recommended_actions = result.get("recommended_actions") or []
+
+    _blank_obs = "화면에서 자세·이동 패턴을 확인할 수 없습니다."
 
     parts = []
 
-    # [이름] 휴식권고 레이블 or 심박이상
-    rest_label = _rest_recommendation_label(rest_rec)
-    header = f"[{worker_name}] {rest_label or '심박이상'}" if worker_name else (rest_label or "심박이상")
-    parts.append(header)
+    # 1. [이름] — 식별자만 (고정 텍스트 최소화)
+    if worker_name:
+        parts.append(f"[{worker_name}]")
 
-    # 행동
-    parts.append(f"행동: {behavior_label_from_vlm_result(result)}")
+    # 2. 행동·상황 묘사 — VLM 관찰 텍스트 우선
+    # 이상 행동이면 짧은 키워드 prefix + VLM 상세 묘사
+    _abnormal_prefix = {
+        "staggering": "비틀거림",
+        "falling":    "낙상",
+        "slumping":   "신체 처짐",
+        "leaning":    "기댐",
+        "crouching":  "쭈그림",
+    }
+    prefix = _abnormal_prefix.get(abnormal)
+    obs_text = obs_detail if (obs_detail and obs_detail != _blank_obs) else ""
 
-    # 질병 (건강 위험 요인) - 콜론 뒤 값만, 없으면 "없음"
-    diseases = _risk_factors_from_health_text(health)
-    no_risk = not diseases or "없" in diseases or len(diseases) > 25
-    parts.append(f"질병: {'없음' if no_risk else diseases}")
+    if prefix and obs_text:
+        parts.append(f"{prefix} — {obs_text}")
+    elif prefix:
+        parts.append(prefix)
+    elif obs_text:
+        parts.append(obs_text)
 
-    # 조치 (1개만)
+    # 3. VLM 요약 — 행동 묘사와 내용이 다를 때만 추가
+    if summary and summary != obs_text and not _text_contained(summary, obs_text):
+        parts.append(summary)
+
+    # 4. VLM 생성 조치 — 레이블 없이 바로
     for action in recommended_actions:
         text = _action_text(action)
         if text:
-            parts.append(f"조치: {text}")
+            parts.append(text)
             break
+
+    if not parts:
+        rest_rec = str(result.get("rest_recommendation") or "").strip()
+        return _rest_recommendation_label(rest_rec) or "심박이상"
 
     return " | ".join(parts)
 
@@ -263,6 +286,14 @@ def _action_text(action: Any) -> str:
                 return val.strip()
         return " ".join(str(v) for v in action.values() if v).strip()
     return str(action).strip() if action else ""
+
+
+def _text_contained(a: str, b: str) -> bool:
+    """a의 핵심 내용이 b에 이미 포함되어 있는지 간단히 판단한다."""
+    if not a or not b:
+        return False
+    a_short = a[:30].strip()
+    return a_short in b or b[:30].strip() in a
 
 
 def _behavior_label(abnormal: str, posture: str = "") -> str:
